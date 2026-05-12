@@ -7,26 +7,12 @@ import json
 import os
 from bs4 import BeautifulSoup
 from datetime import datetime
-import google.generativeai as genai
 from typing import List, Dict, Tuple
 
-# --- 1. SETUP AMBIENTE E SICUREZZA ---
+# --- 1. SETUP AMBIENTE ---
 st.set_page_config(page_title="Legal Radar | Hub", layout="wide", page_icon="⚖️")
 
-# Inizializzazione Sicura della API Key di Gemini tramite st.secrets
-def inizializza_ai() -> bool:
-    try:
-        # Cerca la chiave nei secrets di Streamlit Cloud, o nelle variabili d'ambiente (per test locale)
-        api_key = st.secrets.get("GEMINI_API_KEY", os.getenv("GEMINI_API_KEY"))
-        if api_key and api_key.startswith("AIza"):
-            genai.configure(api_key=api_key)
-            return True
-        return False
-    except FileNotFoundError:
-        return False
-
-AI_ATTIVA = inizializza_ai()
-
+# Configurazione Fonti Predefinite
 DEFAULT_FONTI: List[Dict[str, str]] = [
     {"nome": "Agenzia Entrate", "url": "https://www.agenziaentrate.gov.it/portale/web/guest/rss/novita", "area": "Diritto Tributario", "macro": "Leggi & Normativa", "tipo": "RSS"},
     {"nome": "Garante Privacy", "url": "https://www.garanteprivacy.it/o/gpdp-rss/rss?c=10490", "area": "Privacy", "macro": "Provvedimenti & Sentenze", "tipo": "RSS"},
@@ -47,8 +33,7 @@ def carica_fonti() -> List[Dict[str, str]]:
         try:
             with open(FILE_FONTI, "r", encoding="utf-8") as f:
                 return json.load(f)
-        except Exception as e:
-            st.warning(f"Errore caricamento fonti: {e}. Uso predefinite.")
+        except Exception:
             return DEFAULT_FONTI
     return DEFAULT_FONTI
 
@@ -61,7 +46,7 @@ if 'fonti_attive' not in st.session_state:
 if 'ai_summaries' not in st.session_state: 
     st.session_state.ai_summaries = {}
 
-# --- 2. STILE GRAFICO (Mantenuto il tuo design originale pulito) ---
+# --- 2. STILE GRAFICO ---
 st.markdown("""
 <style>
     @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
@@ -87,7 +72,7 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# --- 3. MOTORE LOGICO E INTEGRAZIONE AI (Robustezza e Respectful Crawling) ---
+# --- 3. LOGICA DI ANALISI E AI (REST API DIRETTA) ---
 KEYWORDS_ALTA_PRIORITA = ['sanzion', 'ordinanza', 'condanna', 'violazion', 'scadenza', 'obbligo', 'divieto', 'sentenza']
 KEYWORDS_MEDIA_PRIORITA = ['linee guida', 'consultazione', 'parere', 'chiariment', 'orientament', 'regolamento', 'decreto']
 
@@ -100,155 +85,157 @@ def valuta_priorita(titolo: str) -> Tuple[str, str, str]:
     else: 
         return "INFO (Generale)", "", "tag-info"
 
-def estrai_testo_difensivo(url: str) -> str:
-    """Estrae testo bypassando i blocchi comuni ma rispettando le regole base del web."""
+def estrai_testo_pulito(url: str) -> str:
+    """Scarica e pulisce il testo dell'articolo bypassando blocchi semplici."""
     if url.lower().endswith(('.pdf', '.zip', '.doc')):
-        return "" # Logica per PDF da gestire in futuro
-        
+        return ""
     try:
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, come Gecko) Chrome/120.0.0.0 Safari/537.36"
-        }
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
         response = requests.get(url, headers=headers, timeout=8)
         response.raise_for_status()
-        
         soup = BeautifulSoup(response.text, 'html.parser')
         paragrafi = soup.find_all(['p', 'div'])
-        testo = " ".join([p.get_text(strip=True) for p in paragrafi if len(p.get_text(strip=True)) > 40])
-        return testo[:8000] # Passiamo massimo 8k caratteri a Gemini per ottimizzare velocità e costi
-    except Exception as e:
+        testo = " ".join([p.get_text(strip=True) for p in paragrafi if len(p.get_text(strip=True)) > 45])
+        return testo[:8000]
+    except:
         return ""
 
 def genera_sintesi_gemini(url: str, preview_text: str = "") -> str:
-    if not AI_ATTIVA:
-        return "⚠️ Configura la chiave GEMINI_API_KEY nei Secrets di Streamlit per attivare l'AI."
+    """Chiamata REST diretta a Gemini 1.5 Flash."""
+    # Recupero e PULIZIA forzata della chiave
+    raw_key = st.secrets.get("GEMINI_API_KEY", os.getenv("GEMINI_API_KEY", ""))
+    api_key = str(raw_key).strip() # Rimuove spazi e ritorni a capo invisibili
     
-    testo_estratto = estrai_testo_difensivo(url)
-    testo_per_ai = testo_estratto if len(testo_estratto) > 150 else preview_text
+    if not api_key.startswith("AIza"):
+        return "⚠️ Errore: API Key non trovata o non valida nei Secrets."
+    
+    testo_sito = estrai_testo_pulito(url)
+    testo_per_ai = testo_sito if len(testo_sito) > 200 else preview_text
             
     if len(testo_per_ai.strip()) < 30:
-        return "⚠️ Il contenuto originale non è accessibile e l'anteprima è assente. Sintesi non disponibile."
+        return "⚠️ Contenuto non accessibile per l'analisi."
 
     prompt = (
-        "Sei un Senior Legal Counsel. Fai una sintesi chiarissima e ultra-rapida (max 3 frasi) "
-        "indicando il nucleo normativo/giuridico e gli impatti pratici del seguente testo. "
-        "Se è una sentenza o sanzione, indica l'entità o il principio di diritto.\n\n"
-        f"Testo: {testo_per_ai}"
+        "Sei un esperto legale. Fornisci una sintesi ultra-rapida (max 3 frasi) "
+        "indicando il nucleo giuridico e gli impatti pratici del seguente testo:\n\n"
+        f"{testo_per_ai}"
     )
     
+    # Endpoint ufficiale v1beta per massima compatibilità
+    api_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={api_key}"
+    headers = {'Content-Type': 'application/json'}
+    payload = {
+        "contents": [{"parts": [{"text": prompt}]}],
+        "generationConfig": {"temperature": 0.2}
+    }
+    
     try:
-        model = genai.GenerativeModel('gemini-1.5-flash')
-        response = model.generate_content(prompt)
-        return response.text.strip()
+        response = requests.post(api_url, headers=headers, json=payload, timeout=15)
+        if response.status_code == 200:
+            result = response.json()
+            return result['candidates'][0]['content']['parts'][0]['text'].strip()
+        else:
+            return f"⚠️ Errore Google API {response.status_code}: {response.text[:100]}"
     except Exception as e:
-        return f"⚠️ Errore di comunicazione con l'AI: {e}"
+        return f"⚠️ Errore connessione AI: {str(e)}"
 
-# --- 4. CRAWLER E GESTIONE DATI ---
+# --- 4. MOTORE DI RICERCA NOTIZIE ---
 def calcola_tempo_lettura(testo: str) -> int:
     parole = len(str(testo).split())
-    if parole < 50: return 3 
-    return max(1, parole // 150)
+    return max(1, parole // 150) if parole > 50 else 3
 
-@st.cache_data(ttl=3600, show_spinner=False) # Cache ridotta a 1 ora per maggiore reattività
-def raccogli_notizie_veloce(fonti_list: List[Dict[str, str]]) -> pd.DataFrame:
+@st.cache_data(ttl=3600, show_spinner=False)
+def raccogli_notizie(fonti_list: List[Dict[str, str]]) -> pd.DataFrame:
     dati = []
-    barra = st.progress(0, "Sincronizzazione Fonti in corso...")
+    progress_bar = st.progress(0, "Aggiornamento radar...")
     
     for i, fonte in enumerate(fonti_list):
-        if fonte.get('tipo', 'RSS') == 'RSS':
-            try:
-                feed = feedparser.parse(fonte['url'])
-                limite = 4 if "Google" in fonte['nome'] else 3
-                for entry in feed.entries[:limite]:
-                    priorita_lbl, css_border, css_tag = valuta_priorita(entry.title)
-                    sommario = entry.summary if hasattr(entry, 'summary') else ""
-                    autore = entry.author if hasattr(entry, 'author') else "Redazione"
-                    
-                    if hasattr(entry, 'published_parsed') and entry.published_parsed:
-                        dt = datetime(*entry.published_parsed[:6])
-                        data_formattata = dt.strftime("%d/%m/%Y %H:%M")
-                        sort_date = entry.published_parsed
-                    else:
-                        data_formattata = datetime.now().strftime("%d/%m/%Y")
-                        sort_date = time.localtime()
-                        
-                    tags = [t.term for t in entry.tags if isinstance(t.term, str)] if hasattr(entry, 'tags') else []
-                    tag_str = ", ".join(tags[:2]) if tags else "Diritto"
+        try:
+            feed = feedparser.parse(fonte['url'])
+            # Limitiamo a 3/4 notizie per fonte per velocità
+            for entry in feed.entries[:4]:
+                priorita_lbl, css_border, css_tag = valuta_priorita(entry.title)
+                sommario = entry.summary if hasattr(entry, 'summary') else ""
+                
+                # Gestione Data
+                if hasattr(entry, 'published_parsed') and entry.published_parsed:
+                    dt = datetime(*entry.published_parsed[:6])
+                    data_str = dt.strftime("%d/%m/%Y %H:%M")
+                    data_sort = entry.published_parsed
+                else:
+                    data_str = datetime.now().strftime("%d/%m/%Y")
+                    data_sort = time.localtime()
 
-                    dati.append({
-                        "Data": data_formattata,
-                        "Data_Sort": sort_date,
-                        "Macro": fonte.get('macro', 'News & Aggiornamenti'), 
-                        "Area": fonte['area'], 
-                        "Fonte": fonte['nome'],
-                        "Titolo": entry.title, 
-                        "Autore": autore,
-                        "TempoLettura": calcola_tempo_lettura(sommario),
-                        "Argomenti": tag_str,
-                        "Priorità": priorita_lbl, 
-                        "Link": entry.link,
-                        "Preview": BeautifulSoup(sommario, "html.parser").get_text()[:250] + "...",
-                        "CSS_Border": css_border, 
-                        "CSS_Tag": css_tag
-                    })
-            except Exception as e:
-                pass # Skipping broken feeds silently
-        barra.progress(int((i+1)/len(fonti_list)*100))
-        
-    barra.empty()
+                dati.append({
+                    "Data": data_str,
+                    "Data_Sort": data_sort,
+                    "Macro": fonte.get('macro', 'News'), 
+                    "Area": fonte['area'], 
+                    "Fonte": fonte['nome'],
+                    "Titolo": entry.title, 
+                    "Autore": entry.get('author', 'Redazione'),
+                    "TempoLettura": calcola_tempo_lettura(sommario),
+                    "Link": entry.link,
+                    "Preview": BeautifulSoup(sommario, "html.parser").get_text()[:250] + "...",
+                    "CSS_Border": css_border, 
+                    "CSS_Tag": css_tag,
+                    "Priorità": priorita_lbl
+                })
+        except:
+            continue
+        progress_bar.progress(int((i+1)/len(fonti_list)*100))
+    
+    progress_bar.empty()
     df = pd.DataFrame(dati)
     if not df.empty:
-        df['Sort_Priorita'] = df['Priorità'].apply(lambda x: 0 if "ALTA" in x else (1 if "MEDIA" in x else 2))
-        df = df.sort_values(by=['Sort_Priorita', 'Data_Sort'], ascending=[True, False]).drop(columns=['Sort_Priorita', 'Data_Sort'])
+        # Ordiniamo per priorità (ALTA prima) e poi per data decrescente
+        df['P_Sort'] = df['Priorità'].apply(lambda x: 0 if "ALTA" in x else (1 if "MEDIA" in x else 2))
+        df = df.sort_values(by=['P_Sort', 'Data_Sort'], ascending=[True, False]).drop(columns=['P_Sort', 'Data_Sort'])
     return df
 
-def mostra_cards_interattive(dataframe: pd.DataFrame) -> None:
-    if dataframe.empty:
-        st.info("Nessun aggiornamento in questa sezione.")
+def rendering_notizie(df_filtrato: pd.DataFrame):
+    if df_filtrato.empty:
+        st.info("Nessun aggiornamento trovato in questa categoria.")
         return
-    for idx, row in dataframe.iterrows():
-        with st.container():
-            html_str = f"""
-            <div class="radar-card {row['CSS_Border']}">
-                <div>
-                    <span class="meta-tag {row['CSS_Tag']}">{row['Priorità']}</span>
-                    <span class="meta-tag tag-area">{row['Area']}</span>
-                    <span class="meta-tag tag-fonte">{row['Fonte']}</span>
-                </div>
-                <a href="{row['Link']}" target="_blank" class="card-title">{row['Titolo']}</a>
-                <div class="card-meta-rich">
-                    <div class="meta-item">🗓️ <b>{row['Data']}</b></div>
-                    <div class="meta-item">✍️ {row['Autore']}</div>
-                    <div class="meta-item">⏱️ ~{row['TempoLettura']} min</div>
-                    <div class="meta-item">🏷️ {row['Argomenti']}</div>
-                </div>
-                <div class="card-preview">{row['Preview']}</div>
+    
+    for idx, row in df_filtrato.iterrows():
+        st.markdown(f"""
+        <div class="radar-card {row['CSS_Border']}">
+            <div>
+                <span class="meta-tag {row['CSS_Tag']}">{row['Priorità']}</span>
+                <span class="meta-tag tag-area">{row['Area']}</span>
+                <span class="meta-tag tag-fonte">{row['Fonte']}</span>
             </div>
-            """
-            st.markdown(html_str, unsafe_allow_html=True)
-            
-            link = row['Link']
-            if link in st.session_state.ai_summaries:
-                st.markdown(f"<div class='card-summary'>✨ <b>Sintesi AI:</b><br>{st.session_state.ai_summaries[link]}</div>", unsafe_allow_html=True)
-            else:
-                if st.button("✨ Genera Executive Summary", key=f"ai_btn_{idx}"):
-                    with st.spinner("L'AI sta analizzando la normativa..."):
-                        sintesi = genera_sintesi_gemini(link, row['Preview'])
-                        st.session_state.ai_summaries[link] = sintesi
-                        st.rerun()
-            st.write("")
+            <a href="{row['Link']}" target="_blank" class="card-title">{row['Titolo']}</a>
+            <div class="card-meta-rich">
+                <div class="meta-item">🗓️ <b>{row['Data']}</b></div>
+                <div class="meta-item">⏱️ ~{row['TempoLettura']} min</div>
+            </div>
+            <div class="card-preview">{row['Preview']}</div>
+        </div>
+        """, unsafe_allow_html=True)
+        
+        # Gestione AI Summary
+        link = row['Link']
+        if link in st.session_state.ai_summaries:
+            st.markdown(f"<div class='card-summary'>✨ <b>Executive Summary:</b><br>{st.session_state.ai_summaries[link]}</div>", unsafe_allow_html=True)
+        else:
+            if st.button("✨ Analizza con AI", key=f"ai_{idx}"):
+                with st.spinner("Analisi in corso..."):
+                    sintesi = genera_sintesi_gemini(link, row['Preview'])
+                    st.session_state.ai_summaries[link] = sintesi
+                    st.rerun()
+        st.write("")
 
-# --- 5. STRUTTURA DEL SITO E INTERFACCIA ---
-if 'df_news' not in st.session_state or st.session_state.df_news.empty:
-    st.session_state.df_news = raccogli_notizie_veloce(st.session_state.fonti_attive)
-df = st.session_state.df_news
+# --- 5. INTERFACCIA UTENTE ---
+if 'df_news' not in st.session_state:
+    st.session_state.df_news = raccogli_notizie(st.session_state.fonti_attive)
 
 with st.sidebar:
-    st.image("https://cdn-icons-png.flaticon.com/512/3214/3214746.png", width=60)
-    st.title("Legal Radar")
-    st.caption("Intelligence Normativa Architettata")
+    st.title("⚖️ Legal Radar")
+    st.caption("Intelligence Normativa v2.0")
     
-    pagina = st.radio("Navigazione", [
+    pagina = st.radio("Sezioni", [
         "📖 Leggi & Normativa", 
         "🏛️ Provvedimenti & Sentenze", 
         "📰 News & Aggiornamenti",
@@ -256,64 +243,45 @@ with st.sidebar:
     ])
     
     st.divider()
-    if st.button("🔄 Sincronizza Hub", type="primary", use_container_width=True):
-        st.cache_data.clear() 
-        st.session_state.df_news = raccogli_notizie_veloce(st.session_state.fonti_attive)
+    if st.button("🔄 Sincronizza Adesso", type="primary", use_container_width=True):
+        st.cache_data.clear()
+        st.session_state.df_news = raccogli_notizie(st.session_state.fonti_attive)
         st.rerun()
-        
-    if not AI_ATTIVA:
-        st.error("⚠️ Motore AI Disconnesso.")
-    else:
-        st.success("✅ Motore AI Operativo.")
 
-# --- GESTIONE PAGINE ---
+# Routing Pagine
+df = st.session_state.df_news
 if pagina == "📖 Leggi & Normativa":
     st.header("Leggi & Normativa")
-    if not df.empty: mostra_cards_interattive(df[df['Macro'] == "Leggi & Normativa"])
+    rendering_notizie(df[df['Macro'] == "Leggi & Normativa"])
 
 elif pagina == "🏛️ Provvedimenti & Sentenze":
     st.header("Provvedimenti & Sentenze")
-    if not df.empty: mostra_cards_interattive(df[df['Macro'] == "Provvedimenti & Sentenze"])
+    rendering_notizie(df[df['Macro'] == "Provvedimenti & Sentenze"])
 
 elif pagina == "📰 News & Aggiornamenti":
     st.header("News & Aggiornamenti")
-    if not df.empty: mostra_cards_interattive(df[df['Macro'] == "News & Aggiornamenti"])
+    rendering_notizie(df[df['Macro'] == "News & Aggiornamenti"])
 
 elif pagina == "⚙️ Gestione Fonti":
-    st.header("Gestione Database Fonti")
-    
-    with st.form("form_nuova_fonte", clear_on_submit=True):
+    st.header("Database Fonti")
+    # Form aggiunta
+    with st.form("nuova_fonte"):
         c1, c2 = st.columns(2)
-        with c1:
-            n_nome = st.text_input("Nome Autorità/Sito")
-            n_url = st.text_input("URL (Feed RSS)")
-        with c2:
-            n_macro = st.selectbox("Categoria Macro", ["Leggi & Normativa", "Provvedimenti & Sentenze", "News & Aggiornamenti"])
-            n_area = st.text_input("Materia (es. Penale, Compliance)")
-        
-        if st.form_submit_button("➕ Aggiungi al Radar"):
-            if n_nome and n_url and n_area:
-                st.session_state.fonti_attive.append({"nome": n_nome, "url": n_url, "area": n_area, "macro": n_macro, "tipo": "RSS"})
+        n_nome = c1.text_input("Nome Autorità")
+        n_url = c1.text_input("URL Feed RSS")
+        n_macro = c2.selectbox("Categoria", ["Leggi & Normativa", "Provvedimenti & Sentenze", "News & Aggiornamenti"])
+        n_area = c2.text_input("Area Legale (es. Privacy)")
+        if st.form_submit_button("Aggiungi"):
+            if n_nome and n_url:
+                st.session_state.fonti_attive.append({"nome": n_nome, "url": n_url, "area": n_area, "macro": n_macro})
                 salva_fonti(st.session_state.fonti_attive)
-                st.cache_data.clear()
-                st.session_state.df_news = raccogli_notizie_veloce(st.session_state.fonti_attive)
-                st.success(f"Fonte '{n_nome}' validata e inserita!")
-                st.rerun()
-            else:
-                st.error("Compilare tutti i campi obbligatori.")
-                
-    st.divider()
-    st.subheader(f"📚 Repository Fonti Attuali ({len(st.session_state.fonti_attive)})")
+                st.success("Fonte aggiunta! Sincronizza per vedere i dati.")
     
-    for i, fonte in enumerate(st.session_state.fonti_attive):
-        col_testo, col_btn = st.columns([5, 1])
-        with col_testo:
-            st.markdown(f"**{fonte['nome']}** - {fonte['macro']} ({fonte['area']})<br><span style='font-size:12px;color:#888;'>{fonte['url']}</span>", unsafe_allow_html=True)
-        with col_btn:
-            if st.button("🗑️ Rimuovi", key=f"del_{i}"):
-                st.session_state.fonti_attive.pop(i)
-                salva_fonti(st.session_state.fonti_attive)
-                st.cache_data.clear()
-                st.session_state.df_news = raccogli_notizie_veloce(st.session_state.fonti_attive)
-                st.rerun()
-        st.write("---")
+    # Lista fonti per eliminazione
+    for i, f in enumerate(st.session_state.fonti_attive):
+        col1, col2 = st.columns([4,1])
+        col1.write(f"**{f['nome']}** ({f['area']})")
+        if col2.button("Elimina", key=f"del_{i}"):
+            st.session_state.fonti_attive.pop(i)
+            salva_fonti(st.session_state.fonti_attive)
+            st.rerun()
