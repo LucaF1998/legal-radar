@@ -101,7 +101,7 @@ def estrai_testo_pulito(url: str) -> str:
         return ""
 
 def genera_sintesi_groq(url: str, preview_text: str = "") -> str:
-    """Chiamata REST diretta a Groq (Modello Llama3)."""
+    """Chiamata REST diretta a Groq (Modello Llama aggiornato)."""
     # Recupero e PULIZIA forzata della chiave Groq
     raw_key = st.secrets.get("GROQ_API_KEY", os.getenv("GROQ_API_KEY", ""))
     api_key = str(raw_key).strip() # Rimuove spazi e ritorni a capo invisibili
@@ -123,7 +123,7 @@ def genera_sintesi_groq(url: str, preview_text: str = "") -> str:
     }
     
     payload = {
-        "model": "llama3-70b-8192", # Modello open-source eccezionale per testo e sintesi
+        "model": "llama-3.3-70b-versatile", # ECCO LA SOLUZIONE: Nome del modello aggiornato
         "messages": [
             {"role": "system", "content": "Sei un esperto legale italiano. Fornisci una sintesi ultra-rapida (max 3 frasi) indicando il nucleo giuridico e gli impatti pratici del seguente testo."},
             {"role": "user", "content": f"Testo da analizzare:\n\n{testo_per_ai}"}
