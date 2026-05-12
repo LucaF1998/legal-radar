@@ -72,7 +72,7 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# --- 3. LOGICA DI ANALISI E AI (REST API DIRETTA) ---
+# --- 3. LOGICA DI ANALISI E AI (REST API DIRETTA GROQ) ---
 KEYWORDS_ALTA_PRIORITA = ['sanzion', 'ordinanza', 'condanna', 'violazion', 'scadenza', 'obbligo', 'divieto', 'sentenza']
 KEYWORDS_MEDIA_PRIORITA = ['linee guida', 'consultazione', 'parere', 'chiariment', 'orientament', 'regolamento', 'decreto']
 
@@ -100,14 +100,14 @@ def estrai_testo_pulito(url: str) -> str:
     except:
         return ""
 
-def genera_sintesi_gemini(url: str, preview_text: str = "") -> str:
-    """Chiamata REST diretta a Gemini 1.5 Flash."""
-    # Recupero e PULIZIA forzata della chiave
-    raw_key = st.secrets.get("GEMINI_API_KEY", os.getenv("GEMINI_API_KEY", ""))
+def genera_sintesi_groq(url: str, preview_text: str = "") -> str:
+    """Chiamata REST diretta a Groq (Modello Llama3)."""
+    # Recupero e PULIZIA forzata della chiave Groq
+    raw_key = st.secrets.get("GROQ_API_KEY", os.getenv("GROQ_API_KEY", ""))
     api_key = str(raw_key).strip() # Rimuove spazi e ritorni a capo invisibili
     
-    if not api_key.startswith("AIza"):
-        return "⚠️ Errore: API Key non trovata o non valida nei Secrets."
+    if not api_key.startswith("gsk_"):
+        return "⚠️ Errore: API Key Groq non trovata o non valida nei Secrets (deve iniziare con gsk_)."
     
     testo_sito = estrai_testo_pulito(url)
     testo_per_ai = testo_sito if len(testo_sito) > 200 else preview_text
@@ -115,27 +115,29 @@ def genera_sintesi_gemini(url: str, preview_text: str = "") -> str:
     if len(testo_per_ai.strip()) < 30:
         return "⚠️ Contenuto non accessibile per l'analisi."
 
-    prompt = (
-        "Sei un esperto legale. Fornisci una sintesi ultra-rapida (max 3 frasi) "
-        "indicando il nucleo giuridico e gli impatti pratici del seguente testo:\n\n"
-        f"{testo_per_ai}"
-    )
+    # Endpoint OpenAI-compatibile di Groq
+    api_url = "https://api.groq.com/openai/v1/chat/completions"
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json"
+    }
     
-    # Endpoint ufficiale v1beta per massima compatibilità
-    api_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={api_key}"
-    headers = {'Content-Type': 'application/json'}
     payload = {
-        "contents": [{"parts": [{"text": prompt}]}],
-        "generationConfig": {"temperature": 0.2}
+        "model": "llama3-70b-8192", # Modello open-source eccezionale per testo e sintesi
+        "messages": [
+            {"role": "system", "content": "Sei un esperto legale italiano. Fornisci una sintesi ultra-rapida (max 3 frasi) indicando il nucleo giuridico e gli impatti pratici del seguente testo."},
+            {"role": "user", "content": f"Testo da analizzare:\n\n{testo_per_ai}"}
+        ],
+        "temperature": 0.2
     }
     
     try:
         response = requests.post(api_url, headers=headers, json=payload, timeout=15)
         if response.status_code == 200:
             result = response.json()
-            return result['candidates'][0]['content']['parts'][0]['text'].strip()
+            return result['choices'][0]['message']['content'].strip()
         else:
-            return f"⚠️ Errore Google API {response.status_code}: {response.text[:100]}"
+            return f"⚠️ Errore Groq API {response.status_code}: {response.text[:100]}"
     except Exception as e:
         return f"⚠️ Errore connessione AI: {str(e)}"
 
@@ -222,7 +224,8 @@ def rendering_notizie(df_filtrato: pd.DataFrame):
         else:
             if st.button("✨ Analizza con AI", key=f"ai_{idx}"):
                 with st.spinner("Analisi in corso..."):
-                    sintesi = genera_sintesi_gemini(link, row['Preview'])
+                    # Ora richiama il motore di Groq
+                    sintesi = genera_sintesi_groq(link, row['Preview']) 
                     st.session_state.ai_summaries[link] = sintesi
                     st.rerun()
         st.write("")
