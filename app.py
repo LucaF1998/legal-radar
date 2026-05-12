@@ -66,7 +66,7 @@ def genera_sintesi_gemini(url: str, preview: str) -> str:
     input_ai = testo if len(testo) > 200 else preview
     
     # ENDPOINT v1 STABLE
-    api_url = f"https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent?key={api_key}"
+    api_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={api_key}"
     
     payload = {
         "contents": [{"parts": [{"text": f"Fai una sintesi legale di 3 frasi: {input_ai}"}]}],
