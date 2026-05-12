@@ -6,14 +6,12 @@ import requests
 import json
 import os
 from bs4 import BeautifulSoup
-from datetime import datetime
-from typing import List, Dict, Tuple
 
 # --- 1. SETUP AMBIENTE ---
 st.set_page_config(page_title="Legal Radar | Hub", layout="wide", page_icon="⚖️")
 
 # Configurazione Fonti Predefinite
-DEFAULT_FONTI: List[Dict[str, str]] = [
+DEFAULT_FONTI = [
     {"nome": "Agenzia Entrate", "url": "https://www.agenziaentrate.gov.it/portale/web/guest/rss/novita", "area": "Diritto Tributario", "macro": "Leggi & Normativa"},
     {"nome": "Garante Privacy", "url": "https://www.garanteprivacy.it/o/gpdp-rss/rss?c=10490", "area": "Privacy", "macro": "Provvedimenti & Sentenze"},
     {"nome": "EDPB Europa", "url": "https://edpb.europa.eu/rss.xml", "area": "Privacy", "macro": "Provvedimenti & Sentenze"},
@@ -33,10 +31,7 @@ st.markdown("""
     @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap');
     html, body, [class*="css"] { font-family: 'Inter', sans-serif; background-color: #f7f9fc; }
     .radar-card { background: white; border-radius: 12px; padding: 20px; border: 1px solid #eaeaea; margin-bottom: 15px; border-left: 5px solid #ff6600; box-shadow: 0 2px 5px rgba(0,0,0,0.05); }
-    .priority-alta { border-left-color: #d32f2f; } 
-    .priority-media { border-left-color: #f57c00; } 
     .card-title { font-size: 18px; font-weight: 700; color: #1a1a1a; text-decoration: none; display: block; margin-bottom: 10px; }
-    .card-meta { font-size: 12px; color: #666; margin-bottom: 10px; }
     .card-summary { font-size: 14px; color: #333; background: #fff5eb; border: 1px solid #ffd6b3; padding: 12px; border-radius: 8px; margin-top: 10px; }
     .meta-tag { display: inline-block; padding: 3px 8px; border-radius: 15px; font-size: 10px; font-weight: 700; text-transform: uppercase; margin-right: 5px; }
     .tag-area { background: #eef2ff; color: #4338ca; }
@@ -44,46 +39,51 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# --- 3. LOGICA AI (v1 STABLE + DEBUG) ---
+# --- 3. LOGICA AI (NUOVO MOTORE: GROQ + LLAMA 3) ---
 def estrai_testo(url: str) -> str:
     try:
         headers = {"User-Agent": "Mozilla/5.0"}
-        res = requests.get(url, headers=headers, timeout=5)
+        res = requests.get(url, headers=headers, timeout=6)
         soup = BeautifulSoup(res.text, 'html.parser')
-        paragraphs = soup.find_all('p')
-        return " ".join([p.get_text() for p in paragraphs])[:6000]
+        paragraphs = soup.find_all(['p', 'div'])
+        return " ".join([p.get_text(strip=True) for p in paragraphs if len(p.get_text(strip=True)) > 40])[:6000]
     except: return ""
 
-def genera_sintesi_gemini(url: str, preview: str) -> str:
-    # RECUPERO E PULIZIA CHIAVE
-    raw_key = st.secrets.get("GEMINI_API_KEY", "")
-    api_key = str(raw_key).replace('"', '').replace("'", "").strip()
+def genera_sintesi_ai(url: str, preview: str) -> str:
+    # Lettura della nuova chiave Groq
+    api_key = st.secrets.get("GROQ_API_KEY", "").strip()
     
-    if not api_key.startswith("AIza"):
-        return f"⚠️ Chiave non valida. Inizia con: '{api_key[:4]}...'"
+    if not api_key.startswith("gsk_"):
+        return "⚠️ Configura una chiave GROQ_API_KEY (inizia con gsk_) nei Secrets di Streamlit."
 
     testo = estrai_testo(url)
     input_ai = testo if len(testo) > 200 else preview
     
-    # ENDPOINT v1 STABLE
-    api_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={api_key}"
+    api_url = "https://api.groq.com/openai/v1/chat/completions"
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json"
+    }
     
     payload = {
-        "contents": [{"parts": [{"text": f"Fai una sintesi legale di 3 frasi: {input_ai}"}]}],
-        "generationConfig": {"temperature": 0.1}
+        "model": "llama3-70b-8192",  # Modello potentissimo e veloce
+        "messages": [
+            {"role": "system", "content": "Sei un Senior Legal Counsel. Analizza il testo fornito e scrivi un executive summary in lingua italiana di massimo 3 frasi. Evidenzia solo il nucleo normativo e l'impatto pratico."},
+            {"role": "user", "content": f"Testo da analizzare: {input_ai}"}
+        ],
+        "temperature": 0.2 # Bassa temperatura per risposte più precise e fattuali
     }
     
     try:
-        response = requests.post(api_url, json=payload, timeout=10)
+        response = requests.post(api_url, headers=headers, json=payload, timeout=15)
         if response.status_code == 200:
-            return response.json()['candidates'][0]['content']['parts'][0]['text']
+            return response.json()['choices'][0]['message']['content'].strip()
         else:
-            # Ora stampiamo TUTTO il messaggio originale di Google
-            return f"❌ DIAGNOSTICA GOOGLE: {response.text}"
+            return f"❌ Errore AI: {response.text}"
     except Exception as e:
-        return f"⚠️ Errore connessione: {str(e)}"
+        return f"⚠️ Errore di rete: {str(e)}"
 
-# --- 4. ENGINE ---
+# --- 4. ENGINE SCRAPING ---
 @st.cache_data(ttl=3600)
 def fetch_news(fonti):
     news = []
@@ -98,14 +98,15 @@ def fetch_news(fonti):
         except: continue
     return pd.DataFrame(news)
 
-# --- 5. UI ---
+# --- 5. UI PRINCIPALE ---
 st.title("⚖️ Legal Radar")
-if st.sidebar.button("🔄 Aggiorna Dati"): st.cache_data.clear()
+if st.sidebar.button("🔄 Sincronizza Dati"): st.cache_data.clear()
 
 df = fetch_news(st.session_state.fonti_attive)
 tab1, tab2, tab3 = st.tabs(["Normativa", "Sentenze", "News"])
 
 def render_tab(macro):
+    if df.empty: return
     items = df[df['Macro'] == macro]
     for i, r in items.iterrows():
         st.markdown(f"""
@@ -116,12 +117,13 @@ def render_tab(macro):
             <p style='font-size:13px; color:#444;'>{r['Preview']}...</p>
         </div>
         """, unsafe_allow_html=True)
+        
         if r['Link'] in st.session_state.ai_summaries:
-            st.markdown(f"<div class='card-summary'>✨ {st.session_state.ai_summaries[r['Link']]}</div>", unsafe_allow_html=True)
+            st.markdown(f"<div class='card-summary'>✨ <b>Executive Summary:</b><br>{st.session_state.ai_summaries[r['Link']]}</div>", unsafe_allow_html=True)
         else:
-            if st.button(f"Analizza con AI", key=f"btn_{macro}_{i}"):
-                with st.spinner("Analisi..."):
-                    st.session_state.ai_summaries[r['Link']] = genera_sintesi_gemini(r['Link'], r['Preview'])
+            if st.button(f"✨ Genera Sintesi", key=f"btn_{macro}_{i}"):
+                with st.spinner("L'AI sta analizzando il testo..."):
+                    st.session_state.ai_summaries[r['Link']] = genera_sintesi_ai(r['Link'], r['Preview'])
                     st.rerun()
 
 with tab1: render_tab("Leggi & Normativa")
