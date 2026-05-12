@@ -78,7 +78,8 @@ def genera_sintesi_gemini(url: str, preview: str) -> str:
         if response.status_code == 200:
             return response.json()['candidates'][0]['content']['parts'][0]['text']
         else:
-            return f"❌ Errore Google {response.status_code}. Verifica la chiave (inizia con {api_key[:4]})."
+            # Ora stampiamo TUTTO il messaggio originale di Google
+            return f"❌ DIAGNOSTICA GOOGLE: {response.text}"
     except Exception as e:
         return f"⚠️ Errore connessione: {str(e)}"
 
