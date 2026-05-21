@@ -196,13 +196,12 @@ class LegalRadarDB:
         conn = self.get_connection()
         cur = conn.cursor()
         cur.execute("SELECT 1 FROM bookmarks WHERE user_id = %s AND article_id = %s", (user_id, article_id))
-        esiste = cur.fetchone() is not null
+        esiste = cur.fetchone() is not None  # RISOLTO: In Python si usa None, non null!
         cur.close()
         conn.close()
         return esiste
 
 # --- 2. CONFIGURAZIONE INIZIALE ---
-# Recupero stringa database dai secrets
 DB_URL = st.secrets.get("DB_URL", "")
 if not DB_URL:
     st.error("Rilevamento fallito: inserisci DB_URL nei Secrets di Streamlit.")
@@ -225,7 +224,6 @@ if len(db.carica_fonti()) == 0:
     for f in DEFAULT_FONTI:
         db.aggiungi_fonte(f['nome'], f['url'], f['area'], f['macro'])
 
-# Inizializzazione Session State
 if 'user' not in st.session_state: st.session_state.user = None
 if 'ai_summaries' not in st.session_state: st.session_state.ai_summaries = {}
 
@@ -248,7 +246,7 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# --- 4. MOTORE LOGICO E SCRAPING (STORICO DA t0) ---
+# --- 4. MOTORE LOGICO E SCRAPING ---
 def estrai_testo_pulito(url: str) -> str:
     if url.lower().endswith(('.pdf', '.zip', '.doc')): return ""
     try:
@@ -299,7 +297,7 @@ def sincronizza_radar_in_database() -> None:
     if articoli_scovati:
         db.salva_articoli_storico(articoli_scovati)
 
-# --- 5. SCHERMATA DI AUTENTICAZIONE (Punto 4) ---
+# --- 5. SCHERMATA DI AUTENTICAZIONE ---
 if st.session_state.user is None:
     st.title("⚖️ Legal Radar | Autenticazione")
     st.caption("Accedi all'Intelligence Normativa Personalizzata")
@@ -317,7 +315,7 @@ if st.session_state.user is None:
                 if db.registra_utente(username, password):
                     st.success("Registrazione completata! Ora puoi effettuare il login.")
                 else:
-                    st.error("Username già esistente.")
+                    st.error("Username già existent o errore.")
             elif scelta == "Accedi":
                 user = db.verifica_utente(username, password)
                 if user:
@@ -326,9 +324,9 @@ if st.session_state.user is None:
                     st.rerun()
                 else:
                     st.error("Credenziali errate.")
-    st.stop() # Blocca il caricamento del sito se non sei loggato
+    st.stop()
 
-# --- 6. INTERFACCIA APPLICAZIONE (UTENTE AUTENTICATO) ---
+# --- 6. INTERFACCIA UTENTE AUTENTICATO ---
 with st.sidebar:
     st.title("⚖️ Legal Radar")
     st.write(f"👤 Utente: **{st.session_state.user['username']}**")
@@ -352,7 +350,6 @@ with st.sidebar:
         st.session_state.user = None
         st.rerun()
 
-# Funzione di rendering unificata delle card legali
 def mostra_hub_legale(lista_articoli: List[Dict], tipo_bacheca: str):
     if not lista_articoli:
         st.info("Nessun articolo trovato in questo archivio storico.")
@@ -371,7 +368,6 @@ def mostra_hub_legale(lista_articoli: List[Dict], tipo_bacheca: str):
             </div>
             """, unsafe_allow_html=True)
             
-            # Gestione pulsanti d'azione (Salva / Preferiti)
             c1, c2 = st.columns([1, 3])
             with c1:
                 if tipo_bacheca == "bookmarks":
@@ -379,7 +375,6 @@ def mostra_hub_legale(lista_articoli: List[Dict], tipo_bacheca: str):
                         db.rimuovi_bookmark(st.session_state.user['id'], art['id'])
                         st.rerun()
                 else:
-                    # Controlla se è già salvato
                     if db.check_bookmark_esiste(st.session_state.user['id'], art['id']):
                         st.caption("🔖 Già salvato nei tuoi preferiti")
                     else:
@@ -388,7 +383,6 @@ def mostra_hub_legale(lista_articoli: List[Dict], tipo_bacheca: str):
                             st.success("Articolo salvato!")
                             st.rerun()
             
-            # Gestione AI Summary (Groq Llama 3.3)
             link = art['link']
             if link in st.session_state.ai_summaries:
                 st.markdown(f"<div class='card-summary'>✨ <b>Sintesi AI:</b><br>{st.session_state.ai_summaries[link]}</div>", unsafe_allow_html=True)
@@ -400,16 +394,13 @@ def mostra_hub_legale(lista_articoli: List[Dict], tipo_bacheca: str):
                             st.rerun()
             st.write("")
 
-# BARRA DI RICERCA GLOBALE SULL'ARCHIVIO STORICO (Punto 3)
 ricerca = ""
 if pagina != "⚙️ Gestione Fonti":
-    ricerca = st.text_input("🔍 Cerca parole chiave nell'archivio storico (es. sanzioni, garante, decreto)...")
+    ricerca = st.text_input("🔍 Cerca parole chiave nell'archivio storico...")
 
-# ROUTING DELLE PAGINE
 if pagina in ["📖 Leggi & Normativa", "🏛️ Provvedimenti & Sentenze", "📰 News & Aggiornamenti"]:
     macro_categoria = pagina.replace("📖 ", "").replace("🏛️ ", "").replace("📰 ", "")
     st.header(macro_categoria)
-    # Estraiamo gli articoli filtrati dal database storico + ricerca testuale
     dati_db = db.estrai_archivio(filtro_macro=macro_categoria, ricerca_testo=ricerca)
     mostra_hub_legale(dati_db, tipo_bacheca="radar")
 
@@ -430,7 +421,7 @@ elif pagina == "⚙️ Gestione Fonti":
         if st.form_submit_button("➕ Salva Fonte nel Database"):
             if n_nome and n_url and n_area:
                 if db.aggiungi_fonte(n_nome, n_url, n_area, n_macro):
-                    st.success(f"Fonte '{n_nome}' registrata ed esportata stabilmente nel DB cloud!")
+                    st.success(f"Fonte '{n_nome}' registrata nel DB cloud!")
                     st.rerun()
                 else:
                     st.error("Errore. URL probabilmente già registrato.")
