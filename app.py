@@ -3,288 +3,448 @@ import pandas as pd
 import feedparser
 import time
 import requests
-import json
 import os
 from bs4 import BeautifulSoup
 from datetime import datetime
-from typing import List, Dict, Tuple
+import psycopg2
+import psycopg2.extras
+import bcrypt
+from typing import List, Dict, Tuple, Optional
 
-# --- 1. SETUP AMBIENTE ---
-st.set_page_config(page_title="Legal Radar | Hub", layout="wide", page_icon="⚖️")
+# --- 1. CLASSE ARCHITETTURALE DATABASE (POSTGRESQL) ---
+class LegalRadarDB:
+    def __init__(self, db_url: str):
+        self.db_url = db_url
+        self.init_db()
 
-# Configurazione Fonti Predefinite
-DEFAULT_FONTI: List[Dict[str, str]] = [
-    {"nome": "Agenzia Entrate", "url": "https://www.agenziaentrate.gov.it/portale/web/guest/rss/novita", "area": "Diritto Tributario", "macro": "Leggi & Normativa", "tipo": "RSS"},
-    {"nome": "Garante Privacy", "url": "https://www.garanteprivacy.it/o/gpdp-rss/rss?c=10490", "area": "Privacy", "macro": "Provvedimenti & Sentenze", "tipo": "RSS"},
-    {"nome": "EDPB Europa", "url": "https://edpb.europa.eu/rss.xml", "area": "Privacy", "macro": "Provvedimenti & Sentenze", "tipo": "RSS"},
-    {"nome": "Banca d'Italia", "url": "https://www.bancaditalia.it/rss/media.xml", "area": "Diritto Bancario", "macro": "Provvedimenti & Sentenze", "tipo": "RSS"},
-    {"nome": "Consob", "url": "https://www.consob.it/web/area-pubblica/rss", "area": "Diritto Bancario", "macro": "Provvedimenti & Sentenze", "tipo": "RSS"},
-    {"nome": "IVASS", "url": "https://www.ivass.it/util/index.rss.html?lingua=it", "area": "Diritto assicurativo", "macro": "Leggi & Normativa", "tipo": "RSS"},
-    {"nome": "CGUE", "url": "https://curia.europa.eu/site/rss.jsp?lang=it&secondLang=en", "area": "Giurisprudenza UE", "macro": "Provvedimenti & Sentenze", "tipo": "RSS"},
-    {"nome": "EBA", "url": "https://www.eba.europa.eu/news-press/news/rss.xml", "area": "Diritto Bancario", "macro": "Leggi & Normativa", "tipo": "RSS"},
-    {"nome": "Altalex", "url": "https://www.altalex.com/rss", "area": "Legale Generale", "macro": "News & Aggiornamenti", "tipo": "RSS"},
-    {"nome": "Google News", "url": "https://news.google.com/rss/search?q=garante+privacy+OR+diritto+bancario+OR+agenzia+entrate+OR+legale+cybersecurity&hl=it&gl=IT&ceid=IT:it", "area": "News dal Web", "macro": "News & Aggiornamenti", "tipo": "RSS"}
-]
+    def get_connection(self):
+        return psycopg2.connect(self.db_url)
 
-FILE_FONTI = "fonti.json"
-
-def carica_fonti() -> List[Dict[str, str]]:
-    if os.path.exists(FILE_FONTI):
+    def init_db(self) -> None:
+        """Crea le tabelle se non esistono nel cloud di Neon."""
+        commands = (
+            """
+            CREATE TABLE IF NOT EXISTS users (
+                id SERIAL PRIMARY KEY,
+                username VARCHAR(150) UNIQUE NOT NULL,
+                password_hash VARCHAR(255) NOT NULL,
+                role VARCHAR(50) DEFAULT 'user'
+            )
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS sources (
+                id SERIAL PRIMARY KEY,
+                nome VARCHAR(150) NOT NULL,
+                url TEXT UNIQUE NOT NULL,
+                area VARCHAR(150),
+                macro VARCHAR(150)
+            )
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS articles (
+                id SERIAL PRIMARY KEY,
+                titolo TEXT NOT NULL,
+                link TEXT UNIQUE NOT NULL,
+                preview TEXT,
+                macro VARCHAR(150),
+                area VARCHAR(150),
+                fonte VARCHAR(150),
+                data_scansione TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS bookmarks (
+                user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+                article_id INTEGER REFERENCES articles(id) ON DELETE CASCADE,
+                PRIMARY KEY (user_id, article_id)
+            )
+            """
+        )
+        conn = None
         try:
-            with open(FILE_FONTI, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except Exception:
-            return DEFAULT_FONTI
-    return DEFAULT_FONTI
+            conn = self.get_connection()
+            cur = conn.cursor()
+            for command in commands:
+                cur.execute(command)
+            cur.close()
+            conn.commit()
+        except Exception as e:
+            st.error(f"Errore critico di connessione al database: {e}")
+        finally:
+            if conn: conn.close()
 
-def salva_fonti(fonti_list: List[Dict[str, str]]) -> None:
-    with open(FILE_FONTI, "w", encoding="utf-8") as f:
-        json.dump(fonti_list, f, indent=4)
+    def registra_utente(self, username: str, password: str) -> bool:
+        try:
+            conn = self.get_connection()
+            cur = conn.cursor()
+            hashed = bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
+            cur.execute("INSERT INTO users (username, password_hash) VALUES (%s, %s)", (username.strip(), hashed))
+            conn.commit()
+            cur.close()
+            return True
+        except: return False
+        finally: conn.close()
 
-if 'fonti_attive' not in st.session_state: 
-    st.session_state.fonti_attive = carica_fonti()
-if 'ai_summaries' not in st.session_state: 
-    st.session_state.ai_summaries = {}
+    def verifica_utente(self, username: str, password: str) -> Optional[Dict]:
+        conn = self.get_connection()
+        cur = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
+        cur.execute("SELECT * FROM users WHERE username = %s", (username.strip(),))
+        user = cur.fetchone()
+        cur.close()
+        conn.close()
+        if user and bcrypt.checkpw(password.encode('utf-8'), user['password_hash'].encode('utf-8')):
+            return dict(user)
+        return None
 
-# --- 2. STILE GRAFICO ---
+    def carica_fonti(self) -> List[Dict]:
+        conn = self.get_connection()
+        cur = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
+        cur.execute("SELECT * FROM sources ORDER BY nome ASC")
+        fonti = cur.fetchall()
+        cur.close()
+        conn.close()
+        return [dict(f) for f in fonti]
+
+    def aggiungi_fonte(self, nome: str, url: str, area: str, macro: str) -> bool:
+        try:
+            conn = self.get_connection()
+            cur = conn.cursor()
+            cur.execute("INSERT INTO sources (nome, url, area, macro) VALUES (%s, %s, %s, %s) ON CONFLICT (url) DO NOTHING", (nome, url, area, macro))
+            conn.commit()
+            cur.close()
+            return True
+        except: return False
+        finally: conn.close()
+
+    def rimuovi_fonte(self, fonte_id: int) -> None:
+        conn = self.get_connection()
+        cur = conn.cursor()
+        cur.execute("DELETE FROM sources WHERE id = %s", (fonte_id,))
+        conn.commit()
+        cur.close()
+        conn.close()
+
+    def salva_articoli_storico(self, articoli_lista: List[Dict]) -> None:
+        conn = self.get_connection()
+        cur = conn.cursor()
+        query = """
+            INSERT INTO articles (titolo, link, preview, macro, area, fonte) 
+            VALUES (%s, %s, %s, %s, %s, %s) 
+            ON CONFLICT (link) DO NOTHING
+        """
+        for art in articoli_lista:
+            cur.execute(query, (art['Titolo'], art['Link'], art['Preview'], art['Macro'], art['Area'], art['Fonte']))
+        conn.commit()
+        cur.close()
+        conn.close()
+
+    def estrai_archivio(self, filtro_macro: str, ricerca_testo: str = "") -> List[Dict]:
+        conn = self.get_connection()
+        cur = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
+        query = "SELECT * FROM articles WHERE macro = %s"
+        params = [filtro_macro]
+        if ricerca_testo:
+            query += " AND (titolo ILIKE %s OR preview ILIKE %s OR area ILIKE %s)"
+            text_param = f"%{ricerca_testo}%"
+            params.extend([text_param, text_param, text_param])
+        query += " ORDER BY data_scansione DESC LIMIT 100"
+        cur.execute(query, params)
+        articoli = cur.fetchall()
+        cur.close()
+        conn.close()
+        return [dict(a) for a in articoli]
+
+    def aggiungi_bookmark(self, user_id: int, article_id: int) -> None:
+        try:
+            conn = self.get_connection()
+            cur = conn.cursor()
+            cur.execute("INSERT INTO bookmarks (user_id, article_id) VALUES (%s, %s) ON CONFLICT DO NOTHING", (user_id, article_id))
+            conn.commit()
+            cur.close()
+        except: pass
+        finally: conn.close()
+
+    def rimuovi_bookmark(self, user_id: int, article_id: int) -> None:
+        conn = self.get_connection()
+        cur = conn.cursor()
+        cur.execute("DELETE FROM bookmarks WHERE user_id = %s AND article_id = %s", (user_id, article_id))
+        conn.commit()
+        cur.close()
+        conn.close()
+
+    def estrai_bookmarks(self, user_id: int, ricerca_testo: str = "") -> List[Dict]:
+        conn = self.get_connection()
+        cur = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
+        query = """
+            SELECT a.* FROM articles a 
+            JOIN bookmarks b ON a.id = b.article_id 
+            WHERE b.user_id = %s
+        """
+        params = [user_id]
+        if ricerca_testo:
+            query += " AND (a.titolo ILIKE %s OR a.preview ILIKE %s)"
+            text_param = f"%{ricerca_testo}%"
+            params.extend([text_param, text_param])
+        query += " ORDER BY a.data_scansione DESC"
+        cur.execute(query, params)
+        salvati = cur.fetchall()
+        cur.close()
+        conn.close()
+        return [dict(s) for s in salvati]
+
+    def check_bookmark_esiste(self, user_id: int, article_id: int) -> bool:
+        conn = self.get_connection()
+        cur = conn.cursor()
+        cur.execute("SELECT 1 FROM bookmarks WHERE user_id = %s AND article_id = %s", (user_id, article_id))
+        esiste = cur.fetchone() is not null
+        cur.close()
+        conn.close()
+        return esiste
+
+# --- 2. CONFIGURAZIONE INIZIALE ---
+# Recupero stringa database dai secrets
+DB_URL = st.secrets.get("DB_URL", "")
+if not DB_URL:
+    st.error("Rilevamento fallito: inserisci DB_URL nei Secrets di Streamlit.")
+    st.stop()
+
+db = LegalRadarDB(DB_URL)
+
+# Seed delle fonti predefinite se il DB è vuoto
+if len(db.carica_fonti()) == 0:
+    DEFAULT_FONTI = [
+        {"nome": "Agenzia Entrate", "url": "https://www.agenziaentrate.gov.it/portale/web/guest/rss/novita", "area": "Diritto Tributario", "macro": "Leggi & Normativa"},
+        {"nome": "Garante Privacy", "url": "https://www.garanteprivacy.it/o/gpdp-rss/rss?c=10490", "area": "Privacy", "macro": "Provvedimenti & Sentenze"},
+        {"nome": "EDPB Europa", "url": "https://edpb.europa.eu/rss.xml", "area": "Privacy", "macro": "Provvedimenti & Sentenze"},
+        {"nome": "Banca d'Italia", "url": "https://www.bancaditalia.it/rss/media.xml", "area": "Diritto Bancario", "macro": "Provvedimenti & Sentenze"},
+        {"nome": "Consob", "url": "https://www.consob.it/web/area-pubblica/rss", "area": "Diritto Bancario", "macro": "Provvedimenti & Sentenze"},
+        {"nome": "IVASS", "url": "https://www.ivass.it/util/index.rss.html?lingua=it", "area": "Diritto assicurativo", "macro": "Leggi & Normativa"},
+        {"nome": "CGUE", "url": "https://curia.europa.eu/site/rss.jsp?lang=it&secondLang=en", "area": "Giurisprudenza UE", "macro": "Provvedimenti & Sentenze"},
+        {"nome": "Altalex", "url": "https://www.altalex.com/rss", "area": "Legale Generale", "macro": "News & Aggiornamenti"}
+    ]
+    for f in DEFAULT_FONTI:
+        db.aggiungi_fonte(f['nome'], f['url'], f['area'], f['macro'])
+
+# Inizializzazione Session State
+if 'user' not in st.session_state: st.session_state.user = None
+if 'ai_summaries' not in st.session_state: st.session_state.ai_summaries = {}
+
+# --- 3. STILE GRAFICO ---
 st.markdown("""
 <style>
     @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
     html, body, [class*="css"] { font-family: 'Inter', sans-serif; background-color: #f7f9fc; }
     div.stButton > button[kind="primary"] { background-color: #ff6600; color: white; border: none; font-weight: 600; border-radius: 8px;}
     div.stButton > button[kind="primary"]:hover { background-color: #e65c00; box-shadow: 0 4px 8px rgba(255, 102, 0, 0.3); }
-    .radar-card { background: white; border-radius: 12px; padding: 24px; border: 1px solid #eaeaea; margin-bottom: 20px; border-left: 6px solid #ff6600; box-shadow: 0 2px 8px rgba(0,0,0,0.04); transition: transform 0.2s, box-shadow 0.2s; }
-    .radar-card:hover { transform: translateY(-3px); box-shadow: 0 8px 16px rgba(0,0,0,0.08); border-left-color: #ff8533; }
-    .priority-alta { border-left-color: #d32f2f; } 
-    .priority-media { border-left-color: #f57c00; } 
+    .radar-card { background: white; border-radius: 12px; padding: 24px; border: 1px solid #eaeaea; margin-bottom: 20px; border-left: 6px solid #ff6600; box-shadow: 0 2px 8px rgba(0,0,0,0.04); }
     .card-title { font-size: 19px; font-weight: 700; color: #1a1a1a; text-decoration: none; margin-bottom: 12px; display: block; line-height: 1.3; }
     .card-title:hover { color: #ff6600; }
-    .card-meta-rich { font-size: 13px; color: #666; margin-bottom: 15px; display: flex; flex-wrap: wrap; gap: 12px; align-items: center; border-bottom: 1px solid #f0f0f0; padding-bottom: 10px;}
-    .meta-item { display: flex; align-items: center; gap: 4px; }
+    .card-meta-rich { font-size: 13px; color: #666; margin-bottom: 15px; display: flex; flex-wrap: wrap; gap: 12px; border-bottom: 1px solid #f0f0f0; padding-bottom: 10px;}
     .card-preview { font-size: 14px; color: #4a4a4a; margin-bottom: 15px; line-height: 1.6; }
     .card-summary { font-size: 14px; color: #333; line-height: 1.6; background: #fff5eb; border: 1px solid #ffd6b3; padding: 15px; border-radius: 8px; margin-top: 15px; }
-    .meta-tag { display: inline-block; padding: 4px 10px; border-radius: 20px; font-size: 11px; font-weight: 700; text-transform: uppercase; margin-right: 8px; margin-bottom: 12px; letter-spacing: 0.5px;}
+    .meta-tag { display: inline-block; padding: 4px 10px; border-radius: 20px; font-size: 11px; font-weight: 700; text-transform: uppercase; margin-right: 8px; margin-bottom: 12px;}
     .tag-area { background: #eef2ff; color: #4338ca; }
     .tag-fonte { background: #fff3eb; color: #ff6600; border: 1px solid #ffd6b3;}
-    .tag-alta { background: #fef2f2; color: #dc2626; border: 1px solid #fecaca;}
-    .tag-media { background: #fffbeb; color: #d97706; border: 1px solid #fde68a;}
-    .tag-info { background: #f3f4f6; color: #4b5563; }
 </style>
 """, unsafe_allow_html=True)
 
-# --- 3. LOGICA DI ANALISI E AI (REST API DIRETTA GROQ) ---
-KEYWORDS_ALTA_PRIORITA = ['sanzion', 'ordinanza', 'condanna', 'violazion', 'scadenza', 'obbligo', 'divieto', 'sentenza']
-KEYWORDS_MEDIA_PRIORITA = ['linee guida', 'consultazione', 'parere', 'chiariment', 'orientament', 'regolamento', 'decreto']
-
-def valuta_priorita(titolo: str) -> Tuple[str, str, str]:
-    t = titolo.lower()
-    if any(k in t for k in KEYWORDS_ALTA_PRIORITA): 
-        return "ALTA (Urgenti/Sanzioni)", "priority-alta", "tag-alta"
-    elif any(k in t for k in KEYWORDS_MEDIA_PRIORITA): 
-        return "MEDIA (Norme/Linee Guida)", "priority-media", "tag-media"
-    else: 
-        return "INFO (Generale)", "", "tag-info"
-
+# --- 4. MOTORE LOGICO E SCRAPING (STORICO DA t0) ---
 def estrai_testo_pulito(url: str) -> str:
-    """Scarica e pulisce il testo dell'articolo bypassando blocchi semplici."""
-    if url.lower().endswith(('.pdf', '.zip', '.doc')):
-        return ""
+    if url.lower().endswith(('.pdf', '.zip', '.doc')): return ""
     try:
-        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
-        response = requests.get(url, headers=headers, timeout=8)
-        response.raise_for_status()
-        soup = BeautifulSoup(response.text, 'html.parser')
-        paragrafi = soup.find_all(['p', 'div'])
-        testo = " ".join([p.get_text(strip=True) for p in paragrafi if len(p.get_text(strip=True)) > 45])
-        return testo[:8000]
-    except:
-        return ""
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+        res = requests.get(url, headers=headers, timeout=6)
+        soup = BeautifulSoup(res.text, 'html.parser')
+        paragraphs = soup.find_all(['p', 'div'])
+        return " ".join([p.get_text(strip=True) for p in paragraphs if len(p.get_text(strip=True)) > 45])[:6000]
+    except: return ""
 
-def genera_sintesi_groq(url: str, preview_text: str = "") -> str:
-    """Chiamata REST diretta a Groq (Modello Llama aggiornato)."""
-    # Recupero e PULIZIA forzata della chiave Groq
-    raw_key = st.secrets.get("GROQ_API_KEY", os.getenv("GROQ_API_KEY", ""))
-    api_key = str(raw_key).strip() # Rimuove spazi e ritorni a capo invisibili
-    
-    if not api_key.startswith("gsk_"):
-        return "⚠️ Errore: API Key Groq non trovata o non valida nei Secrets (deve iniziare con gsk_)."
+def genera_sintesi_groq(url: str, preview_text: str) -> str:
+    raw_key = st.secrets.get("GROQ_API_KEY", "").strip()
+    if not raw_key.startswith("gsk_"): return "⚠️ Configura la chiave GROQ_API_KEY nei Secrets."
     
     testo_sito = estrai_testo_pulito(url)
-    testo_per_ai = testo_sito if len(testo_sito) > 200 else preview_text
-            
-    if len(testo_per_ai.strip()) < 30:
-        return "⚠️ Contenuto non accessibile per l'analisi."
-
-    # Endpoint OpenAI-compatibile di Groq
-    api_url = "https://api.groq.com/openai/v1/chat/completions"
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json"
-    }
+    input_ai = testo_sito if len(testo_sito) > 200 else preview_text
     
+    api_url = "https://api.groq.com/openai/v1/chat/completions"
+    headers = {"Authorization": f"Bearer {raw_key}", "Content-Type": "application/json"}
     payload = {
-        "model": "llama-3.3-70b-versatile", # ECCO LA SOLUZIONE: Nome del modello aggiornato
+        "model": "llama-3.3-70b-versatile",
         "messages": [
-            {"role": "system", "content": "Sei un esperto legale italiano. Fornisci una sintesi ultra-rapida (max 3 frasi) indicando il nucleo giuridico e gli impatti pratici del seguente testo."},
-            {"role": "user", "content": f"Testo da analizzare:\n\n{testo_per_ai}"}
+            {"role": "system", "content": "Sei un esperto legale italiano. Fai un sunto di max 3 frasi evidenziando nucleo normativo e impatti pratici."},
+            {"role": "user", "content": input_ai}
         ],
         "temperature": 0.2
     }
-    
     try:
-        response = requests.post(api_url, headers=headers, json=payload, timeout=15)
-        if response.status_code == 200:
-            result = response.json()
-            return result['choices'][0]['message']['content'].strip()
-        else:
-            return f"⚠️ Errore Groq API {response.status_code}: {response.text[:100]}"
-    except Exception as e:
-        return f"⚠️ Errore connessione AI: {str(e)}"
+        r = requests.post(api_url, headers=headers, json=payload, timeout=12)
+        if r.status_code == 200: return r.json()['choices'][0]['message']['content'].strip()
+        return f"⚠️ Errore AI ({r.status_code})"
+    except: return "⚠️ Connessione AI fallita."
 
-# --- 4. MOTORE DI RICERCA NOTIZIE ---
-def calcola_tempo_lettura(testo: str) -> int:
-    parole = len(str(testo).split())
-    return max(1, parole // 150) if parole > 50 else 3
-
-@st.cache_data(ttl=3600, show_spinner=False)
-def raccogli_notizie(fonti_list: List[Dict[str, str]]) -> pd.DataFrame:
-    dati = []
-    progress_bar = st.progress(0, "Aggiornamento radar...")
-    
-    for i, fonte in enumerate(fonti_list):
+def sincronizza_radar_in_database() -> None:
+    fonti = db.carica_fonti()
+    articoli_scovati = []
+    for f in fonti:
         try:
-            feed = feedparser.parse(fonte['url'])
-            # Limitiamo a 3/4 notizie per fonte per velocità
-            for entry in feed.entries[:4]:
-                priorita_lbl, css_border, css_tag = valuta_priorita(entry.title)
+            feed = feedparser.parse(f['url'])
+            for entry in feed.entries[:5]:
                 sommario = entry.summary if hasattr(entry, 'summary') else ""
-                
-                # Gestione Data
-                if hasattr(entry, 'published_parsed') and entry.published_parsed:
-                    dt = datetime(*entry.published_parsed[:6])
-                    data_str = dt.strftime("%d/%m/%Y %H:%M")
-                    data_sort = entry.published_parsed
-                else:
-                    data_str = datetime.now().strftime("%d/%m/%Y")
-                    data_sort = time.localtime()
-
-                dati.append({
-                    "Data": data_str,
-                    "Data_Sort": data_sort,
-                    "Macro": fonte.get('macro', 'News'), 
-                    "Area": fonte['area'], 
-                    "Fonte": fonte['nome'],
-                    "Titolo": entry.title, 
-                    "Autore": entry.get('author', 'Redazione'),
-                    "TempoLettura": calcola_tempo_lettura(sommario),
-                    "Link": entry.link,
-                    "Preview": BeautifulSoup(sommario, "html.parser").get_text()[:250] + "...",
-                    "CSS_Border": css_border, 
-                    "CSS_Tag": css_tag,
-                    "Priorità": priorita_lbl
+                preview = BeautifulSoup(sommario, "html.parser").get_text()[:250] + "..."
+                articoli_scovati.append({
+                    "Titolo": entry.title, "Link": entry.link, "Preview": preview,
+                    "Macro": f['macro'], "Area": f['area'], "Fonte": f['nome']
                 })
-        except:
-            continue
-        progress_bar.progress(int((i+1)/len(fonti_list)*100))
-    
-    progress_bar.empty()
-    df = pd.DataFrame(dati)
-    if not df.empty:
-        # Ordiniamo per priorità (ALTA prima) e poi per data decrescente
-        df['P_Sort'] = df['Priorità'].apply(lambda x: 0 if "ALTA" in x else (1 if "MEDIA" in x else 2))
-        df = df.sort_values(by=['P_Sort', 'Data_Sort'], ascending=[True, False]).drop(columns=['P_Sort', 'Data_Sort'])
-    return df
+        except: continue
+    if articoli_scovati:
+        db.salva_articoli_storico(articoli_scovati)
 
-def rendering_notizie(df_filtrato: pd.DataFrame):
-    if df_filtrato.empty:
-        st.info("Nessun aggiornamento trovato in questa categoria.")
-        return
+# --- 5. SCHERMATA DI AUTENTICAZIONE (Punto 4) ---
+if st.session_state.user is None:
+    st.title("⚖️ Legal Radar | Autenticazione")
+    st.caption("Accedi all'Intelligence Normativa Personalizzata")
     
-    for idx, row in df_filtrato.iterrows():
-        st.markdown(f"""
-        <div class="radar-card {row['CSS_Border']}">
-            <div>
-                <span class="meta-tag {row['CSS_Tag']}">{row['Priorità']}</span>
-                <span class="meta-tag tag-area">{row['Area']}</span>
-                <span class="meta-tag tag-fonte">{row['Fonte']}</span>
-            </div>
-            <a href="{row['Link']}" target="_blank" class="card-title">{row['Titolo']}</a>
-            <div class="card-meta-rich">
-                <div class="meta-item">🗓️ <b>{row['Data']}</b></div>
-                <div class="meta-item">⏱️ ~{row['TempoLettura']} min</div>
-            </div>
-            <div class="card-preview">{row['Preview']}</div>
-        </div>
-        """, unsafe_allow_html=True)
+    scelta = st.radio("Seleziona Azione", ["Accedi", "Registrati"], horizontal=True)
+    with st.form("auth_form"):
+        username = st.text_input("Username / Email")
+        password = st.text_input("Password", type="password")
+        submit = st.form_submit_button("Conferma")
         
-        # Gestione AI Summary
-        link = row['Link']
-        if link in st.session_state.ai_summaries:
-            st.markdown(f"<div class='card-summary'>✨ <b>Executive Summary:</b><br>{st.session_state.ai_summaries[link]}</div>", unsafe_allow_html=True)
-        else:
-            if st.button("✨ Analizza con AI", key=f"ai_{idx}"):
-                with st.spinner("Analisi in corso..."):
-                    # Ora richiama il motore di Groq
-                    sintesi = genera_sintesi_groq(link, row['Preview']) 
-                    st.session_state.ai_summaries[link] = sintesi
+        if submit:
+            if not username or not password:
+                st.error("Compila tutti i campi.")
+            elif scelta == "Registrati":
+                if db.registra_utente(username, password):
+                    st.success("Registrazione completata! Ora puoi effettuare il login.")
+                else:
+                    st.error("Username già esistente.")
+            elif scelta == "Accedi":
+                user = db.verifica_utente(username, password)
+                if user:
+                    st.session_state.user = user
+                    st.success(f"Accesso eseguito. Benvenuto {user['username']}!")
                     st.rerun()
-        st.write("")
+                else:
+                    st.error("Credenziali errate.")
+    st.stop() # Blocca il caricamento del sito se non sei loggato
 
-# --- 5. INTERFACCIA UTENTE ---
-if 'df_news' not in st.session_state:
-    st.session_state.df_news = raccogli_notizie(st.session_state.fonti_attive)
-
+# --- 6. INTERFACCIA APPLICAZIONE (UTENTE AUTENTICATO) ---
 with st.sidebar:
     st.title("⚖️ Legal Radar")
-    st.caption("Intelligence Normativa v2.0")
+    st.write(f"👤 Utente: **{st.session_state.user['username']}**")
     
-    pagina = st.radio("Sezioni", [
+    pagina = st.radio("Navigazione", [
         "📖 Leggi & Normativa", 
         "🏛️ Provvedimenti & Sentenze", 
         "📰 News & Aggiornamenti",
+        "🔖 I Miei Salvati",
         "⚙️ Gestione Fonti"
     ])
     
     st.divider()
-    if st.button("🔄 Sincronizza Adesso", type="primary", use_container_width=True):
-        st.cache_data.clear()
-        st.session_state.df_news = raccogli_notizie(st.session_state.fonti_attive)
+    if st.button("🔄 Sincronizza ed Espandi Archivio", type="primary", use_container_width=True):
+        with st.spinner("Scansione fonti legali e scrittura in archivio..."):
+            sincronizza_radar_in_database()
+            st.success("Archivio aggiornato!")
+            st.rerun()
+            
+    if st.button("🚪 Esci", use_container_width=True):
+        st.session_state.user = None
         st.rerun()
 
-# Routing Pagine
-df = st.session_state.df_news
-if pagina == "📖 Leggi & Normativa":
-    st.header("Leggi & Normativa")
-    rendering_notizie(df[df['Macro'] == "Leggi & Normativa"])
+# Funzione di rendering unificata delle card legali
+def mostra_hub_legale(lista_articoli: List[Dict], tipo_bacheca: str):
+    if not lista_articoli:
+        st.info("Nessun articolo trovato in questo archivio storico.")
+        return
+        
+    for art in lista_articoli:
+        with st.container():
+            st.markdown(f"""
+            <div class="radar-card">
+                <div>
+                    <span class="meta-tag tag-area">{art['area']}</span>
+                    <span class="meta-tag tag-fonte">{art['fonte']}</span>
+                </div>
+                <a href="{art['link']}" target="_blank" class="card-title">{art['titolo']}</a>
+                <div class="card-preview">{art['preview']}</div>
+            </div>
+            """, unsafe_allow_html=True)
+            
+            # Gestione pulsanti d'azione (Salva / Preferiti)
+            c1, c2 = st.columns([1, 3])
+            with c1:
+                if tipo_bacheca == "bookmarks":
+                    if st.button("🗑️ Rimuovi dai preferiti", key=f"rem_{art['id']}"):
+                        db.rimuovi_bookmark(st.session_state.user['id'], art['id'])
+                        st.rerun()
+                else:
+                    # Controlla se è già salvato
+                    if db.check_bookmark_esiste(st.session_state.user['id'], art['id']):
+                        st.caption("🔖 Già salvato nei tuoi preferiti")
+                    else:
+                        if st.button("🔖 Salva per dopo", key=f"save_{art['id']}"):
+                            db.aggiungi_bookmark(st.session_state.user['id'], art['id'])
+                            st.success("Articolo salvato!")
+                            st.rerun()
+            
+            # Gestione AI Summary (Groq Llama 3.3)
+            link = art['link']
+            if link in st.session_state.ai_summaries:
+                st.markdown(f"<div class='card-summary'>✨ <b>Sintesi AI:</b><br>{st.session_state.ai_summaries[link]}</div>", unsafe_allow_html=True)
+            else:
+                with c2:
+                    if st.button("✨ Genera Analisi AI", key=f"ai_{art['id']}"):
+                        with st.spinner("Analisi in corso..."):
+                            st.session_state.ai_summaries[link] = genera_sintesi_groq(link, art['preview'])
+                            st.rerun()
+            st.write("")
 
-elif pagina == "🏛️ Provvedimenti & Sentenze":
-    st.header("Provvedimenti & Sentenze")
-    rendering_notizie(df[df['Macro'] == "Provvedimenti & Sentenze"])
+# BARRA DI RICERCA GLOBALE SULL'ARCHIVIO STORICO (Punto 3)
+ricerca = ""
+if pagina != "⚙️ Gestione Fonti":
+    ricerca = st.text_input("🔍 Cerca parole chiave nell'archivio storico (es. sanzioni, garante, decreto)...")
 
-elif pagina == "📰 News & Aggiornamenti":
-    st.header("News & Aggiornamenti")
-    rendering_notizie(df[df['Macro'] == "News & Aggiornamenti"])
+# ROUTING DELLE PAGINE
+if pagina in ["📖 Leggi & Normativa", "🏛️ Provvedimenti & Sentenze", "📰 News & Aggiornamenti"]:
+    macro_categoria = pagina.replace("📖 ", "").replace("🏛️ ", "").replace("📰 ", "")
+    st.header(macro_categoria)
+    # Estraiamo gli articoli filtrati dal database storico + ricerca testuale
+    dati_db = db.estrai_archivio(filtro_macro=macro_categoria, ricerca_testo=ricerca)
+    mostra_hub_legale(dati_db, tipo_bacheca="radar")
+
+elif pagina == "🔖 I Miei Salvati":
+    st.header("I Miei Articoli Salvati")
+    dati_salvati = db.estrai_bookmarks(user_id=st.session_state.user['id'], ricerca_testo=ricerca)
+    mostra_hub_legale(dati_salvati, tipo_bacheca="bookmarks")
 
 elif pagina == "⚙️ Gestione Fonti":
-    st.header("Database Fonti")
-    # Form aggiunta
-    with st.form("nuova_fonte"):
-        c1, c2 = st.columns(2)
-        n_nome = c1.text_input("Nome Autorità")
-        n_url = c1.text_input("URL Feed RSS")
-        n_macro = c2.selectbox("Categoria", ["Leggi & Normativa", "Provvedimenti & Sentenze", "News & Aggiornamenti"])
-        n_area = c2.text_input("Area Legale (es. Privacy)")
-        if st.form_submit_button("Aggiungi"):
-            if n_nome and n_url:
-                st.session_state.fonti_attive.append({"nome": n_nome, "url": n_url, "area": n_area, "macro": n_macro})
-                salva_fonti(st.session_state.fonti_attive)
-                st.success("Fonte aggiunta! Sincronizza per vedere i dati.")
+    st.header("Database Persistente Fonti")
     
-    # Lista fonti per eliminazione
-    for i, f in enumerate(st.session_state.fonti_attive):
-        col1, col2 = st.columns([4,1])
-        col1.write(f"**{f['nome']}** ({f['area']})")
-        if col2.button("Elimina", key=f"del_{i}"):
-            st.session_state.fonti_attive.pop(i)
-            salva_fonti(st.session_state.fonti_attive)
+    with st.form("form_aggiunta_fonte", clear_on_submit=True):
+        c1, c2 = st.columns(2)
+        n_nome = c1.text_input("Nome Autorità / Sito")
+        n_url = c1.text_input("URL Feed RSS")
+        n_macro = c2.selectbox("Categoria Macro", ["Leggi & Normativa", "Provvedimenti & Sentenze", "News & Aggiornamenti"])
+        n_area = c2.text_input("Materia Giuridica (es. Compliance, Privacy)")
+        if st.form_submit_button("➕ Salva Fonte nel Database"):
+            if n_nome and n_url and n_area:
+                if db.aggiungi_fonte(n_nome, n_url, n_area, n_macro):
+                    st.success(f"Fonte '{n_nome}' registrata ed esportata stabilmente nel DB cloud!")
+                    st.rerun()
+                else:
+                    st.error("Errore. URL probabilmente già registrato.")
+            else:
+                st.error("Compila tutti i campi.")
+                
+    st.divider()
+    st.subheader("📚 Fonti Attualmente Sincronizzate")
+    fonti_attive = db.carica_fonti()
+    for f in fonti_attive:
+        col_t, col_b = st.columns([5, 1])
+        col_t.markdown(f"**{f['nome']}** - {f['macro']} (*{f['area']}*)<br><span style='font-size:12px;color:#888;'>{f['url']}</span>", unsafe_allow_html=True)
+        if col_b.button("🗑️ Elimina", key=f"del_src_{f['id']}"):
+            db.rimuovi_fonte(f['id'])
+            st.success("Fonte rimossa.")
             st.rerun()
+        st.write("---")
