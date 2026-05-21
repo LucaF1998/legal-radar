@@ -21,7 +21,6 @@ class LegalRadarDB:
         return psycopg2.connect(self.db_url)
 
     def init_db(self) -> None:
-        """Crea le tabelle se non esistono nel cloud di Neon."""
         commands = (
             """
             CREATE TABLE IF NOT EXISTS users (
@@ -104,6 +103,9 @@ class LegalRadarDB:
         cur.close()
         conn.close()
         return [dict(f) for f in fonti]
+
+    def id_fonti_url(self) -> List[str]:
+        return [f['url'] for f in self.carica_fonti()]
 
     def aggiungi_fonte(self, nome: str, url: str, area: str, macro: str) -> bool:
         try:
@@ -196,10 +198,41 @@ class LegalRadarDB:
         conn = self.get_connection()
         cur = conn.cursor()
         cur.execute("SELECT 1 FROM bookmarks WHERE user_id = %s AND article_id = %s", (user_id, article_id))
-        esiste = cur.fetchone() is not None  # RISOLTO: In Python si usa None, non null!
+        esiste = cur.fetchone() is not None
         cur.close()
         conn.close()
         return esiste
+
+    # --- NUOVA FUNZIONE PER METRICHE DASHBOARD ---
+    def estrai_metriche_dashboard(self, user_id: int) -> Dict[str, int]:
+        conn = self.get_connection()
+        cur = conn.cursor()
+        
+        cur.execute("SELECT COUNT(*) FROM articles")
+        tot_articoli = cur.fetchone()[0]
+        
+        cur.execute("SELECT COUNT(*) FROM sources")
+        tot_fonti = cur.fetchone()[0]
+        
+        cur.execute("SELECT COUNT(*) FROM bookmarks WHERE user_id = %s", (user_id,))
+        tot_salvati = cur.fetchone()[0]
+        
+        cur.close()
+        conn.close()
+        return {"articoli": tot_articoli, "fonti": tot_fonti, "salvati": tot_salvati}
+
+    def estrai_ultimi_alert_urgenti(self) -> List[Dict]:
+        """Estrae gli ultimi articoli ad alta priorità basati su parole chiave SQL."""
+        conn = self.get_connection()
+        cur = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
+        keywords = ['%sanzion%', '%ordinanza%', '%condanna%', '%violazion%', '%scadenza%', '%obbligo%', '%divieto%', '%sentenza%']
+        
+        query = "SELECT * FROM articles WHERE " + " OR ".join(["titolo ILIKE %s" for _ in keywords]) + " ORDER BY data_scansione DESC LIMIT 4"
+        cur.execute(query, keywords)
+        alert = cur.fetchall()
+        cur.close()
+        conn.close()
+        return [dict(a) for a in alert]
 
 # --- 2. CONFIGURAZIONE INIZIALE ---
 DB_URL = st.secrets.get("DB_URL", "")
@@ -315,7 +348,7 @@ if st.session_state.user is None:
                 if db.registra_utente(username, password):
                     st.success("Registrazione completata! Ora puoi effettuare il login.")
                 else:
-                    st.error("Username già existent o errore.")
+                    st.error("Username già esistente o errore.")
             elif scelta == "Accedi":
                 user = db.verifica_utente(username, password)
                 if user:
@@ -331,7 +364,9 @@ with st.sidebar:
     st.title("⚖️ Legal Radar")
     st.write(f"👤 Utente: **{st.session_state.user['username']}**")
     
+    # AGGIUNTA: Opzione "Dashboard di Benvenuto" nel menu
     pagina = st.radio("Navigazione", [
+        "🏠 Dashboard",
         "📖 Leggi & Normativa", 
         "🏛️ Provvedimenti & Sentenze", 
         "📰 News & Aggiornamenti",
@@ -394,13 +429,58 @@ def mostra_hub_legale(lista_articoli: List[Dict], tipo_bacheca: str):
                             st.rerun()
             st.write("")
 
+# BARRA DI RICERCA (Nascosta solo in Dashboard e Gestione Fonti)
 ricerca = ""
-if pagina != "⚙️ Gestione Fonti":
+if pagina not in ["⚙️ Gestione Fonti", "🏠 Dashboard"]:
     ricerca = st.text_input("🔍 Cerca parole chiave nell'archivio storico...")
 
-if pagina in ["📖 Leggi & Normativa", "🏛️ Provvedimenti & Sentenze", "📰 News & Aggiornamenti"]:
+# --- ROUTING DELLE PAGINE ---
+
+# AGGIUNTA: LOGICA DELLA DASHBOARD DI BENVENUTO
+if pagina == "🏠 Dashboard":
+    st.title(f"Benvenuto nel tuo Hub, {st.session_state.user['username']}! 👋")
+    st.caption(f"Stato dell'Intelligence Normativa al {datetime.now().strftime('%d/%m/%Y')}")
+    st.write("")
+    
+    # 1. Metriche in Tempo Reale
+    metriche = db.estrai_metriche_dashboard(st.session_state.user['id'])
+    c1, c2, c3 = st.columns(3)
+    c1.metric("📚 Archivio Storico Comune", f"{metriche['articoli']} articoli", help="Totale articoli accumulati da t0")
+    c2.metric("📡 Canali Radar Attivi", f"{metriche['fonti']} fonti", help="Siti istituzionali monitorati")
+    c3.metric("🔖 La Tua Rassegna", f"{metriche['salvati']} salvati", help="Articoli custoditi nella tua area privata")
+    
+    st.divider()
+    
+    # 2. Sezione Alert Urgenti
+    st.subheader("🔥 Ultimi Alert Urgenti Rilevati")
+    st.caption("Notizie recenti contenenti parole chiave critiche (sanzioni, obblighi, sentenze)")
+    
+    alert_urgenti = db.estrai_ultimi_alert_urgenti()
+    if alert_urgenti:
+        for al in alert_urgenti:
+            st.markdown(f"""
+            <div style="background: white; border-radius: 8px; padding: 15px; border: 1px solid #eaeaea; border-left: 4px solid #d32f2f; margin-bottom: 10px;">
+                <span style="font-size: 11px; font-weight: bold; color: #d32f2f; text-transform: uppercase;">⚠️ ALERT</span> | 
+                <span style="font-size: 12px; color: #666;">{al['fonte']} ({al['area']})</span><br>
+                <a href="{al['link']}" target="_blank" style="font-weight: 600; color: #1a1a1a; text-decoration: none; font-size: 15px;">{al['titolo']}</a>
+            </div>
+            """, unsafe_allow_html=True)
+    else:
+        st.info("Nessun alert urgente rilevato nelle ultime scansioni.")
+        
+    st.divider()
+    
+    # 3. Scorciatoie veloci
+    st.subheader("⚡ Azioni Rapide")
+    ca, cb = st.columns(2)
+    with ca:
+        st.info("💡 **Consiglio dell'Architect:** Ricordati di cliccare periodicamente su **'Sincronizza ed Espandi Archivio'** nella barra laterale per addestrare lo storico e scovare nuovi provvedimenti.")
+
+elif pagina in ["📖 Leggi & Normativa", "🏛️ Provvedimenti & Sentenze", "📰 News & Aggiornamenti"]:
     macro_categoria = pagina.replace("📖 ", "").replace("🏛️ ", "").replace("📰 ", "")
     st.header(macro_categoria)
+    dati_db = db.estrai_archivio(filtro_macro=macro_categoria, nickname_testo=ricerca) # Corretto nome parametro se necessario interno
+    # Per consistenza con estrai_archivio(filtro_macro, ricerca_testo)
     dati_db = db.estrai_archivio(filtro_macro=macro_categoria, ricerca_testo=ricerca)
     mostra_hub_legale(dati_db, tipo_bacheca="radar")
 
