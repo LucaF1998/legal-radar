@@ -3,3 +3,5 @@ pandas
 feedparser
 requests
 beautifulsoup4
+psycopg2-binary
+bcrypt
