@@ -11,7 +11,7 @@ import psycopg2.extras
 import bcrypt
 from typing import List, Dict, Tuple, Optional
 
-# --- 1. CLASSE ARCHITETTURALE DATABASE (POSTGRESQL) ---
+# --- 1. CLASSE ARCHITETTURALE DATABASE (POSTGRESQL MULTI-TENANT) ---
 class LegalRadarDB:
     def __init__(self, db_url: str):
         self.db_url = db_url
@@ -56,6 +56,15 @@ class LegalRadarDB:
                 user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
                 article_id INTEGER REFERENCES articles(id) ON DELETE CASCADE,
                 PRIMARY KEY (user_id, article_id)
+            )
+            """,
+            # --- AGGIUNTA TABELLA: PREFERENZE PERSONALI FONTI (Punto 1) ---
+            """
+            CREATE TABLE IF NOT EXISTS user_source_preferences (
+                user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+                source_id INTEGER REFERENCES sources(id) ON DELETE CASCADE,
+                is_active BOOLEAN DEFAULT TRUE,
+                PRIMARY KEY (user_id, source_id)
             )
             """
         )
@@ -104,6 +113,37 @@ class LegalRadarDB:
         conn.close()
         return [dict(f) for f in fonti]
 
+    # --- AGGIUNTA: LETTURA DELLE FONTI CON STATO DI ACCENSIONE UTENTE ---
+    def carica_fonti_con_preferenze(self, user_id: int) -> List[Dict]:
+        conn = self.get_connection()
+        cur = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
+        query = """
+            SELECT s.*, COALESCE(usp.is_active, TRUE) as utente_attiva
+            FROM sources s
+            LEFT JOIN user_source_preferences usp ON s.id = usp.source_id AND usp.user_id = %s
+            ORDER BY s.nome ASC
+        """
+        cur.execute(query, (user_id,))
+        fonti = cur.fetchall()
+        cur.close()
+        conn.close()
+        return [dict(f) for f in fonti]
+
+    # --- AGGIUNTA: SALVATAGGIO ACCENSIONE/SPEGNIMENTO PERSONALE ---
+    def imposta_preferenza_fonte(self, user_id: int, source_id: int, is_active: bool) -> None:
+        conn = self.get_connection()
+        cur = conn.cursor()
+        query = """
+            INSERT INTO user_source_preferences (user_id, source_id, is_active)
+            VALUES (%s, %s, %s)
+            ON CONFLICT (user_id, source_id) 
+            DO UPDATE SET is_active = EXCLUDED.is_active
+        """
+        cur.execute(query, (user_id, source_id, is_active))
+        conn.commit()
+        cur.close()
+        conn.close()
+
     def aggiungi_fonte(self, nome: str, url: str, area: str, macro: str) -> bool:
         try:
             conn = self.get_connection()
@@ -137,11 +177,20 @@ class LegalRadarDB:
         cur.close()
         conn.close()
 
-    def estrai_archivio(self, filtro_macro: str, ricerca_testo: str = "") -> List[Dict]:
+    # --- MODIFICA: ESTRAZIONE ARCHIVIO FILTRATO SULLE PREFERENZE UTENTE ---
+    def estrai_archivio(self, filtro_macro: str, user_id: int, ricerca_testo: str = "") -> List[Dict]:
         conn = self.get_connection()
         cur = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
-        query = "SELECT * FROM articles WHERE macro = %s"
-        params = [filtro_macro]
+        query = """
+            SELECT * FROM articles 
+            WHERE macro = %s 
+            AND fonte NOT IN (
+                SELECT s.nome FROM sources s
+                JOIN user_source_preferences usp ON s.id = usp.source_id
+                WHERE usp.user_id = %s AND usp.is_active = FALSE
+            )
+        """
+        params = [filtro_macro, user_id]
         if ricerca_testo:
             query += " AND (titolo ILIKE %s OR preview ILIKE %s OR area ILIKE %s)"
             text_param = f"%{ricerca_testo}%"
@@ -217,13 +266,25 @@ class LegalRadarDB:
         conn.close()
         return {"articoli": tot_articoli, "fonti": tot_fonti, "salvati": tot_salvati}
 
-    def estrai_ultimi_alert_urgenti(self) -> List[Dict]:
+    # --- MODIFICA: ANCHE GLI ALERT DELLA HOME ESCLUDONO LE FONTI SPENTE ---
+    def estrai_ultimi_alert_urgenti(self, user_id: int) -> List[Dict]:
         conn = self.get_connection()
         cur = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
         keywords = ['%sanzion%', '%ordinanza%', '%condanna%', '%violazion%', '%scadenza%', '%obbligo%', '%divieto%', '%sentenza%']
         
-        query = "SELECT * FROM articles WHERE " + " OR ".join(["titolo ILIKE %s" for _ in keywords]) + " ORDER BY data_scansione DESC LIMIT 4"
-        cur.execute(query, keywords)
+        query = """
+            SELECT * FROM articles 
+            WHERE ({}) 
+            AND fonte NOT IN (
+                SELECT s.nome FROM sources s
+                JOIN user_source_preferences usp ON s.id = usp.source_id
+                WHERE usp.user_id = %s AND usp.is_active = FALSE
+            )
+            ORDER BY data_scansione DESC LIMIT 4
+        """.format(" OR ".join(["titolo ILIKE %s" for _ in keywords]))
+        
+        params = keywords + [user_id]
+        cur.execute(query, params)
         alert = cur.fetchall()
         cur.close()
         conn.close()
@@ -237,7 +298,6 @@ if not DB_URL:
 
 db = LegalRadarDB(DB_URL)
 
-# Seed delle fonti predefinite se il DB è vuoto
 if len(db.carica_fonti()) == 0:
     DEFAULT_FONTI = [
         {"nome": "Agenzia Entrate", "url": "https://www.agenziaentrate.gov.it/portale/web/guest/rss/novita", "area": "Diritto Tributario", "macro": "Leggi & Normativa"},
@@ -265,9 +325,8 @@ st.markdown("""
     .radar-card { background: white; border-radius: 12px; padding: 24px; border: 1px solid #eaeaea; margin-bottom: 20px; border-left: 6px solid #ff6600; box-shadow: 0 2px 8px rgba(0,0,0,0.04); }
     .card-title { font-size: 19px; font-weight: 700; color: #1a1a1a; text-decoration: none; margin-bottom: 12px; display: block; line-height: 1.3; }
     .card-title:hover { color: #ff6600; }
-    .card-meta-rich { font-size: 13px; color: #666; margin-bottom: 15px; display: flex; flex-wrap: wrap; gap: 12px; border-bottom: 1px solid #f0f0f0; padding-bottom: 10px;}
     .card-preview { font-size: 14px; color: #4a4a4a; margin-bottom: 15px; line-height: 1.6; }
-    .card-summary { font-size: 14px; color: #333; line-height: 1.6; background: #fff5eb; border: 1px solid #ffd6b3; padding: 15px; border-radius: 8px; margin-top: 15px; }
+    .card-summary { font-size: 14px; color: #222; line-height: 1.6; background: #fff5eb; border: 1px solid #ffd6b3; padding: 18px; border-radius: 8px; margin-top: 15px; box-shadow: inset 0 1px 3px rgba(0,0,0,0.02); }
     .meta-tag { display: inline-block; padding: 4px 10px; border-radius: 20px; font-size: 11px; font-weight: 700; text-transform: uppercase; margin-right: 8px; margin-bottom: 12px;}
     .tag-area { background: #eef2ff; color: #4338ca; }
     .tag-fonte { background: #fff3eb; color: #ff6600; border: 1px solid #ffd6b3;}
@@ -285,6 +344,7 @@ def estrai_testo_pulito(url: str) -> str:
         return " ".join([p.get_text(strip=True) for p in paragraphs if len(p.get_text(strip=True)) > 45])[:6000]
     except: return ""
 
+# --- MODIFICA: POTENZIAMENTO PROMPT AI VERTICALE (Punto 2) ---
 def genera_sintesi_groq(url: str, preview_text: str) -> str:
     raw_key = st.secrets.get("GROQ_API_KEY", "").strip()
     if not raw_key.startswith("gsk_"): return "⚠️ Configura la chiave GROQ_API_KEY nei Secrets."
@@ -294,16 +354,28 @@ def genera_sintesi_groq(url: str, preview_text: str) -> str:
     
     api_url = "https://api.groq.com/openai/v1/chat/completions"
     headers = {"Authorization": f"Bearer {raw_key}", "Content-Type": "application/json"}
+    
+    system_prompt = (
+        "Sei un Senior Legal Counsel esperto di compliance e mercati digitali, specializzato nel settore dei "
+        "comparatori online e aggregatori di tariffe in Italia (es. Facile.it, Segugio.it). "
+        "Analizza il testo fornito ed elabora un report strutturato rigorosamente in lingua italiana diviso in tre sezioni precise:\n\n"
+        "1) 📝 EXECUTIVE SUMMARY: Una sintesi chiarissima del nucleo normativo o giuridico dell'atto (max 2 frasi).\n"
+        "2) ⚖️ ANALISI LEGALE: I profili di rischio, gli obblighi o le opportunità giuridiche emergenti dall'atto.\n"
+        "3) 🚀 IMPATTO COMPARATORI ONLINE: Una valutazione verticale di come questa novità impatti specificamente sull'operatività, "
+        "sul business, sul marketing o sulla compliance dei siti di comparazione tariffe/assicurazioni/finanza in Italia.\n\n"
+        "Sii autorevole, schematico e pragmatico."
+    )
+    
     payload = {
         "model": "llama-3.3-70b-versatile",
         "messages": [
-            {"role": "system", "content": "Sei un esperto legale italiano. Fai un sunto di max 3 frasi evidenziando nucleo normativo e impatti pratici."},
-            {"role": "user", "content": input_ai}
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": f"Testo da analizzare:\n\n{input_ai}"}
         ],
         "temperature": 0.2
     }
     try:
-        r = requests.post(api_url, headers=headers, json=payload, timeout=12)
+        r = requests.post(api_url, headers=headers, json=payload, timeout=15)
         if r.status_code == 200: return r.json()['choices'][0]['message']['content'].strip()
         return f"⚠️ Errore AI ({r.status_code})"
     except: return "⚠️ Connessione AI fallita."
@@ -381,7 +453,7 @@ with st.sidebar:
 
 def mostra_hub_legale(lista_articoli: List[Dict], tipo_bacheca: str):
     if not lista_articoli:
-        st.info("Nessun articolo trovato in questo archivio storico.")
+        st.info("Nessun articolo trovato in questo archivio storico filtrato.")
         return
         
     for art in lista_articoli:
@@ -414,11 +486,13 @@ def mostra_hub_legale(lista_articoli: List[Dict], tipo_bacheca: str):
             
             link = art['link']
             if link in st.session_state.ai_summaries:
-                st.markdown(f"<div class='card-summary'>✨ <b>Sintesi AI:</b><br>{st.session_state.ai_summaries[link]}</div>", unsafe_allow_html=True)
+                # Sfruttiamo il markdown nativo di Streamlit per interpretare l'output strutturato dell'AI
+                st.markdown("<div class='card-summary'>🤖 <b>Analisi Strategica Legal-Tech:</b></div>", unsafe_allow_html=True)
+                st.markdown(st.session_state.ai_summaries[link])
             else:
                 with c2:
-                    if st.button("✨ Genera Analisi AI", key=f"ai_{art['id']}"):
-                        with st.spinner("Analisi in corso..."):
+                    if st.button("✨ Genera Analisi AI Strategica", key=f"ai_{art['id']}"):
+                        with st.spinner("L'AI sta conducendo l'analisi verticale per i comparatori..."):
                             st.session_state.ai_summaries[link] = genera_sintesi_groq(link, art['preview'])
                             st.rerun()
             st.write("")
@@ -427,7 +501,7 @@ ricerca = ""
 if pagina not in ["⚙️ Gestione Fonti", "🏠 Dashboard"]:
     ricerca = st.text_input("🔍 Cerca parole chiave nell'archivio storico...")
 
-# --- ROUTING DELLE PAGINE ---
+# --- ROUTING PAGINE ---
 if pagina == "🏠 Dashboard":
     st.title(f"Benvenuto nel tuo Hub, {st.session_state.user['username']}! 👋")
     st.caption(f"Stato dell'Intelligence Normativa al {datetime.now().strftime('%d/%m/%Y')}")
@@ -435,16 +509,15 @@ if pagina == "🏠 Dashboard":
     
     metriche = db.estrai_metriche_dashboard(st.session_state.user['id'])
     c1, c2, c3 = st.columns(3)
-    c1.metric("📚 Archivio Storico Comune", f"{metriche['articoli']} articoli", help="Totale articoli accumulati")
-    c2.metric("📡 Canali Radar Attivi", f"{metriche['fonti']} fonti", help="Siti istituzionali monitorati")
-    c3.metric("🔖 La Tua Rassegna", f"{metriche['salvati']} salvati", help="Articoli preferiti custoditi")
+    c1.metric("📚 Archivio Storico Comune", f"{metriche['articoli']} articoli")
+    c2.metric("📡 Canali Radar Attivi", f"{metriche['fonti']} fonti")
+    c3.metric("🔖 La Tua Rassegna", f"{metriche['salvati']} salvati")
     
     st.divider()
+    st.subheader("🔥 Ultimi Alert Urgenti Rilevati (Personalizzati)")
     
-    st.subheader("🔥 Ultimi Alert Urgenti Rilevati")
-    st.caption("Notizie recenti contenenti parole chiave critiche (sanzioni, obblighi, sentenze)")
-    
-    alert_urgenti = db.estrai_ultimi_alert_urgenti()
+    # MODIFICA: Gli alert della Home ora seguono i filtri personali dell'utente
+    alert_urgenti = db.estrai_ultimi_alert_urgenti(st.session_state.user['id'])
     if alert_urgenti:
         for al in alert_urgenti:
             st.markdown(f"""
@@ -455,16 +528,13 @@ if pagina == "🏠 Dashboard":
             </div>
             """, unsafe_allow_html=True)
     else:
-        st.info("Nessun alert urgente rilevato nelle ultime scansioni.")
-        
-    st.divider()
-    st.subheader("⚡ Azioni Rapide")
-    st.info("💡 **Consiglio del Team:** Ricordati di cliccare su **'Sincronizza ed Espandi Archivio'** nella barra laterale per addestrare lo storico e scovare nuovi provvedimenti.")
+        st.info("Nessun alert urgente rilevato dalle tue fonti attive.")
 
 elif pagina in ["📖 Leggi & Normativa", "🏛️ Provvedimenti & Sentenze", "📰 News & Aggiornamenti"]:
     macro_categoria = pagina.replace("📖 ", "").replace("🏛️ ", "").replace("📰 ", "")
     st.header(macro_categoria)
-    dati_db = db.estrai_archivio(filtro_macro=macro_categoria, ricerca_testo=ricerca)
+    # MODIFICA: Passiamo l'ID utente per nascondere gli articoli delle fonti spente
+    dati_db = db.estrai_archivio(filtro_macro=macro_categoria, user_id=st.session_state.user['id'], ricerca_testo=ricerca)
     mostra_hub_legale(dati_db, tipo_bacheca="radar")
 
 elif pagina == "🔖 I Miei Salvati":
@@ -473,18 +543,37 @@ elif pagina == "🔖 I Miei Salvati":
     mostra_hub_legale(dati_salvati, tipo_bacheca="bookmarks")
 
 elif pagina == "⚙️ Gestione Fonti":
-    st.header("Database Persistente Fonti")
+    st.header("Database & Personalizzazione Fonti")
     
+    # MODIFICA: SEZIONE 1 - INTERFACCIA ON/OFF PERSONALE (Punto 1)
+    st.subheader("🎛️ Il Tuo Pannello di Controllo Canali (Personale)")
+    st.caption("Spegni i canali che non vuoi vedere nel tuo feed. Questa modifica ha effetto solo sul tuo account.")
+    
+    fonti_personali = db.carica_fonti_con_preferenze(st.session_state.user['id'])
+    for f in fonti_personali:
+        col_info, col_toggle = st.columns([4, 1])
+        col_info.markdown(f"**{f['nome']}** — *{f['area']}* ({f['macro']})")
+        
+        # Gestione interruttore ON/OFF in tempo reale
+        is_on = col_toggle.toggle("Attivo", value=f['utente_attiva'], key=f"tog_{f['id']}")
+        if is_on != f['utente_attiva']:
+            db.imposta_preferenza_fonte(st.session_state.user['id'], f['id'], is_on)
+            st.rerun()
+            
+    st.divider()
+    
+    # SEZIONE 2 - AGGIUNTA GLOBALE (Per tutti)
+    st.subheader("➕ Aggiungi Nuova Fonte (Globale)")
     with st.form("form_aggiunta_fonte", clear_on_submit=True):
         c1, c2 = st.columns(2)
         n_nome = c1.text_input("Nome Autorità / Sito")
         n_url = c1.text_input("URL Feed RSS")
         n_macro = c2.selectbox("Categoria Macro", ["Leggi & Normativa", "Provvedimenti & Sentenze", "News & Aggiornamenti"])
         n_area = c2.text_input("Materia Giuridica (es. Compliance, Privacy)")
-        if st.form_submit_button("➕ Salva Fonte nel Database"):
+        if st.form_submit_button("➕ Salva Fonte nel Database Comune"):
             if n_nome and n_url and n_area:
                 if db.aggiungi_fonte(n_nome, n_url, n_area, n_macro):
-                    st.success(f"Fonte '{n_nome}' registrata nel DB cloud!")
+                    st.success(f"Fonte '{n_nome}' registrata nel database globale!")
                     st.rerun()
                 else:
                     st.error("Errore. URL probabilmente già registrato.")
@@ -492,13 +581,14 @@ elif pagina == "⚙️ Gestione Fonti":
                 st.error("Compila tutti i campi.")
                 
     st.divider()
-    st.subheader("📚 Fonti Attualmente Sincronizzate")
-    fonti_attive = db.carica_fonti()
-    for f in fonti_attive:
+    
+    # SEZIONE 3 - ELIMINAZIONE GLOBALE
+    st.subheader("🗑️ Database Globale Fonti (Eliminazione per tutti)")
+    for f in fonti_personali:
         col_t, col_b = st.columns([5, 1])
-        col_t.markdown(f"**{f['nome']}** - {f['macro']} (*{f['area']}*)<br><span style='font-size:12px;color:#888;'>{f['url']}</span>", unsafe_allow_html=True)
-        if col_b.button("🗑️ Elimina", key=f"del_src_{f['id']}"):
+        col_t.markdown(f"**{f['nome']}** - <span style='font-size:12px;color:#888;'>{f['url']}</span>", unsafe_allow_html=True)
+        if col_b.button("Elimina", key=f"del_src_{f['id']}"):
             db.rimuovi_fonte(f['id'])
-            st.success("Fonte rimossa.")
+            st.success("Fonte rimossa dal sistema.")
             st.rerun()
         st.write("---")
