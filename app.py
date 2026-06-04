@@ -284,8 +284,13 @@ class LegalRadarDB:
         with self.get_cursor() as cur:
             cur.executemany(query, params)
 
-    # --- MODIFICA: ESTRAZIONE ARCHIVIO FILTRATO SULLE PREFERENZE UTENTE + STATO LETTO ---
-    def estrai_archivio(self, filtro_macro: str, user_id: int, ricerca_testo: str = "") -> List[Dict]:
+    def aggiorna_riassunto_articolo(self, article_id: int, riassunto: str, rilevanza: Optional[str]) -> None:
+        """Salva un micro-riassunto generato tardivamente (per articoli già in archivio)."""
+        with self.get_cursor() as cur:
+            cur.execute(
+                "UPDATE articles SET riassunto_ai = %s, rilevanza = %s WHERE id = %s",
+                (riassunto[:600] if riassunto else None, rilevanza, article_id)
+            )
         query = """
             SELECT a.*, COALESCE(uas.letto, FALSE) AS letto, src.tipo_fonte
             FROM articles a
@@ -458,6 +463,7 @@ db = get_db()
 
 if 'user' not in st.session_state: st.session_state.user = None
 if 'ai_summaries' not in st.session_state: st.session_state.ai_summaries = {}
+if 'micro_riassunti' not in st.session_state: st.session_state.micro_riassunti = {}
 
 # --- 3. STILE GRAFICO ---
 st.markdown("""
@@ -710,21 +716,21 @@ with st.sidebar:
     badge_ruolo = "👑 Admin" if ruolo_corrente == "admin" else "👤 Utente"
     st.write(f"{badge_ruolo}: **{st.session_state.user['username']}**")
 
-    # Conteggi non-letti per badge nella navigazione
+    # Conteggi non-letti mostrati come riepilogo (le label del radio restano fisse)
     non_letti = db.conta_non_letti(st.session_state.user['id'])
-    def _lbl(emoji_label: str, macro: str) -> str:
-        n = non_letti.get(macro, 0)
-        return f"{emoji_label} ({n})" if n else emoji_label
+    tot_non_letti = sum(non_letti.values())
+    if tot_non_letti:
+        st.caption(f"📬 {tot_non_letti} da leggere")
 
     opzioni_nav = [
         "🏠 Dashboard",
-        _lbl("📖 Leggi & Normativa", "Leggi & Normativa"),
-        _lbl("🏛️ Provvedimenti & Sentenze", "Provvedimenti & Sentenze"),
-        _lbl("📰 News & Aggiornamenti", "News & Aggiornamenti"),
+        "📖 Leggi & Normativa",
+        "🏛️ Provvedimenti & Sentenze",
+        "📰 News & Aggiornamenti",
         "🔖 I Miei Salvati",
         "⚙️ Gestione Fonti"
     ]
-    pagina = st.radio("Navigazione", opzioni_nav)
+    pagina = st.radio("Navigazione", opzioni_nav, key="nav_pagina")
     
     st.divider()
     if st.button("🔄 Sincronizza ed Espandi Archivio", type="primary", use_container_width=True):
@@ -763,8 +769,8 @@ def mostra_hub_legale(lista_articoli: List[Dict], tipo_bacheca: str):
                 badge_ril = '<span class="badge-ril badge-ril-media">● Rilevanza media</span>'
             else:
                 badge_ril = ''
-            # Micro-riassunto AI sotto il titolo (se presente)
-            riassunto = art.get('riassunto_ai')
+            # Micro-riassunto AI sotto il titolo: dal DB, o da quello appena generato in sessione
+            riassunto = art.get('riassunto_ai') or st.session_state.get('micro_riassunti', {}).get(art['id'])
             blocco_riassunto = f'<div class="card-microsummary">✦ {html.escape(str(riassunto))}</div>' if riassunto else ''
             card_html = (
                 f'<div class="{classe_card}">'
@@ -801,18 +807,25 @@ def mostra_hub_legale(lista_articoli: List[Dict], tipo_bacheca: str):
                     st.caption("✓ Letto")
             
             link = art['link']
-            if link in st.session_state.ai_summaries:
-                # Sfruttiamo il markdown nativo di Streamlit per interpretare l'output strutturato dell'AI
-                st.markdown("<div class='card-summary'>✦ Analisi strategica legal-tech</div>", unsafe_allow_html=True)
-                st.markdown(st.session_state.ai_summaries[link])
-            else:
+            # Se l'analisi non c'è ancora, mostro il bottone per generarla
+            if link not in st.session_state.ai_summaries:
                 with c3:
                     if st.button("✨ Genera Analisi AI Strategica", key=f"ai_{art['id']}"):
                         with st.spinner("L'AI sta conducendo l'analisi verticale per i comparatori..."):
                             st.session_state.ai_summaries[link] = genera_sintesi_groq(link, art['preview'])
+                            # Se l'articolo non ha ancora il micro-riassunto, lo genero e lo salvo ora
+                            if not art.get('riassunto_ai') and art['id'] not in st.session_state.micro_riassunti:
+                                meta = genera_microriassunto_groq(art.get('titolo',''), art.get('preview',''))
+                                if meta['riassunto']:
+                                    st.session_state.micro_riassunti[art['id']] = meta['riassunto']
+                                    db.aggiorna_riassunto_articolo(art['id'], meta['riassunto'], meta['rilevanza'])
                             # Generare l'analisi implica aver "consumato" l'articolo: marca letto
                             db.segna_letto(st.session_state.user['id'], art['id'])
-                            st.rerun()
+                        # niente st.rerun(): mostro il risultato qui sotto, nello stesso ciclo
+            # Se l'analisi esiste (appena generata o già presente), la mostro sotto la card
+            if link in st.session_state.ai_summaries:
+                st.markdown("<div class='card-summary'>✦ Analisi strategica legal-tech</div>", unsafe_allow_html=True)
+                st.markdown(st.session_state.ai_summaries[link])
             st.write("")
 
 def _semaforo_fonte(s: Dict) -> Tuple[str, str]:
