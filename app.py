@@ -242,6 +242,18 @@ class LegalRadarDB:
         with self.get_cursor() as cur:
             cur.execute("DELETE FROM sources WHERE id = %s", (fonte_id,))
 
+    def reset_archivio(self) -> int:
+        """Azzera l'archivio: articoli + bookmark + stato letto. Riparte da t0 (ID da 1).
+        NON tocca utenti, fonti né preferenze. Ritorna il numero di articoli rimossi."""
+        with self.get_cursor() as cur:
+            cur.execute("SELECT COUNT(*) FROM articles")
+            n = cur.fetchone()[0]
+            # TRUNCATE con CASCADE svuota anche bookmark e user_article_status (riferiscono articles);
+            # RESTART IDENTITY riazzera i contatori degli ID.
+            cur.execute("TRUNCATE TABLE articles RESTART IDENTITY CASCADE")
+        logging.info("Reset archivio: %d articoli rimossi.", n)
+        return n
+
     # --- AGGIUNTA: SALUTE DELLE FONTI ---
     def registra_esito_sync(self, source_id: int, esito: str, messaggio: str = "") -> None:
         """Registra l'esito dell'ultima sincronizzazione di una fonte.
@@ -1131,3 +1143,17 @@ elif pagina_pulita == "⚙️ Gestione Fonti":
                                 st.warning("Impossibile: deve restare almeno un admin.")
                     else:
                         col_act.caption("(tu)")
+
+        # SEZIONE 5 - RESET ARCHIVIO (solo admin, con conferma)
+        st.divider()
+        st.subheader("🧹 Reset archivio (Admin)")
+        st.caption("Azzera tutti gli articoli, i bookmark e lo stato letto, riportando l'archivio a zero (t0). "
+                   "Utenti, fonti e preferenze restano intatti. L'operazione è irreversibile.")
+        conferma_reset = st.checkbox("Confermo: voglio svuotare l'intero archivio articoli", key="conf_reset")
+        if st.button("🧹 Azzera archivio ora", disabled=not conferma_reset, key="btn_reset"):
+            n = db.reset_archivio()
+            # Pulisco anche le cache di sessione legate agli articoli
+            st.session_state.ai_summaries = {}
+            st.session_state.micro_riassunti = {}
+            st.success(f"Archivio azzerato: rimossi {n} articoli. Riparti da t0.")
+            st.rerun()
