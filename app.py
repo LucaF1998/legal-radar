@@ -386,6 +386,79 @@ class LegalRadarDB:
             righe = cur.fetchall()
         return [r[0] for r in righe]
 
+    # --- METODI PER LA DASHBOARD "PRIMA PAGINA" ---
+    def _filtro_fonti_attive(self, user_id: int) -> str:
+        """Frammento SQL riusabile per escludere le fonti spente dall'utente."""
+        return """a.fonte NOT IN (
+            SELECT s.nome FROM sources s
+            JOIN user_source_preferences usp ON s.id = usp.source_id
+            WHERE usp.user_id = %s AND usp.is_active = FALSE
+        )"""
+
+    def estrai_in_evidenza(self, user_id: int, limite: int = 4) -> List[Dict]:
+        """Articoli per apertura + griglia: priorità ad alta rilevanza e non letti, poi recenti."""
+        query = f"""
+            SELECT a.*, COALESCE(uas.letto, FALSE) AS letto, src.tipo_fonte
+            FROM articles a
+            LEFT JOIN user_article_status uas ON uas.article_id = a.id AND uas.user_id = %s
+            LEFT JOIN sources src ON src.nome = a.fonte
+            WHERE {self._filtro_fonti_attive(user_id)}
+            ORDER BY
+                CASE WHEN a.rilevanza = 'alta' THEN 0 ELSE 1 END,
+                COALESCE(uas.letto, FALSE) ASC,
+                a.data_scansione DESC
+            LIMIT %s
+        """
+        with self.get_cursor(dict_cursor=True) as cur:
+            cur.execute(query, (user_id, user_id, limite))
+            righe = cur.fetchall()
+        return [dict(r) for r in righe]
+
+    def estrai_ultima_ora(self, user_id: int, limite: int = 5) -> List[Dict]:
+        """Flusso cronologico grezzo, indipendente dalla rilevanza."""
+        query = f"""
+            SELECT a.*, src.tipo_fonte
+            FROM articles a
+            LEFT JOIN sources src ON src.nome = a.fonte
+            WHERE {self._filtro_fonti_attive(user_id)}
+            ORDER BY a.data_scansione DESC
+            LIMIT %s
+        """
+        with self.get_cursor(dict_cursor=True) as cur:
+            cur.execute(query, (user_id, limite))
+            righe = cur.fetchall()
+        return [dict(r) for r in righe]
+
+    def estrai_per_tema_blocco(self, user_id: int, tema: str, limite: int = 3) -> List[Dict]:
+        """Ultimi articoli di un tema specifico, per i blocchi tematici."""
+        query = f"""
+            SELECT a.*, src.tipo_fonte
+            FROM articles a
+            LEFT JOIN sources src ON src.nome = a.fonte
+            WHERE a.tema = %s AND {self._filtro_fonti_attive(user_id)}
+            ORDER BY a.data_scansione DESC
+            LIMIT %s
+        """
+        with self.get_cursor(dict_cursor=True) as cur:
+            cur.execute(query, (tema, user_id, limite))
+            righe = cur.fetchall()
+        return [dict(r) for r in righe]
+
+    def temi_piu_presenti(self, user_id: int, limite: int = 3) -> List[str]:
+        """I temi con più articoli (per scegliere quali blocchi tematici mostrare)."""
+        query = f"""
+            SELECT a.tema, COUNT(*) AS n
+            FROM articles a
+            WHERE a.tema IS NOT NULL AND {self._filtro_fonti_attive(user_id)}
+            GROUP BY a.tema
+            ORDER BY n DESC
+            LIMIT %s
+        """
+        with self.get_cursor(dict_cursor=True) as cur:
+            cur.execute(query, (user_id, limite))
+            righe = cur.fetchall()
+        return [r['tema'] for r in righe]
+
     def aggiungi_bookmark(self, user_id: int, article_id: int) -> None:
         try:
             with self.get_cursor() as cur:
@@ -595,6 +668,49 @@ st.markdown("""
     .badge-ril { font-size:10px; font-weight:700; letter-spacing:.4px; padding:3px 9px; border-radius:4px; text-transform:uppercase; margin-bottom:12px; display:inline-block; }
     .badge-ril-alta { background:var(--danger-soft); color:var(--danger); }
     .badge-ril-media { background:var(--gold-soft); color:var(--gold-ink); }
+
+    /* ===== DASHBOARD PRIMA PAGINA ===== */
+    :root{
+        --c-provv:#1b3a5b; --c-provv-soft:#e8eef4;
+        --c-sent:#5b3a82; --c-sent-soft:#efe9f5;
+        --c-news:#1f6b4f; --c-news-soft:#e6f1ea;
+    }
+    .kicker{display:inline-flex; align-items:center; gap:6px; font-size:11px; font-weight:700; letter-spacing:1px; text-transform:uppercase; padding:4px 10px; border-radius:4px;}
+    .k-provv{background:var(--c-provv-soft); color:var(--c-provv);}
+    .k-sent{background:var(--c-sent-soft); color:var(--c-sent);}
+    .k-news{background:var(--c-news-soft); color:var(--c-news);}
+    .thumb{height:150px; border-radius:8px; position:relative; overflow:hidden; display:flex; align-items:center; justify-content:center; margin-bottom:0;}
+    .thumb-provv{background:linear-gradient(135deg,#1b3a5b,#2d567f);}
+    .thumb-sent{background:linear-gradient(135deg,#5b3a82,#7d56a8);}
+    .thumb-news{background:linear-gradient(135deg,#1f6b4f,#2f8a68);}
+    .thumb .glyph{font-family:'Fraunces',serif; font-size:54px; color:rgba(255,255,255,.92); font-weight:600;}
+    .thumb .src-chip{position:absolute; bottom:10px; left:10px; background:rgba(255,255,255,.92); color:var(--ink); font-size:10px; font-weight:700; padding:3px 8px; border-radius:3px; text-transform:uppercase; letter-spacing:.4px;}
+    .thumb-lead{height:200px;}
+    .thumb-lead .glyph{font-size:72px;}
+
+    .pp-card{background:var(--surface); border:1px solid var(--line); border-radius:8px; overflow:hidden; height:100%;}
+    .pp-body{padding:16px 18px;}
+    .pp-kicker-wrap{margin-bottom:10px;}
+    .pp-title{font-family:'Fraunces',serif; font-weight:600; line-height:1.25; color:var(--ink); text-decoration:none; display:block; margin-bottom:8px;}
+    .pp-title:hover{color:var(--brand);}
+    .pp-title-lead{font-size:26px; margin-bottom:12px;}
+    .pp-title-grid{font-size:16px;}
+    .pp-sum{color:var(--ink-soft); line-height:1.55;}
+    .pp-sum-lead{font-size:15px;}
+    .pp-sum-grid{font-size:12.5px;}
+
+    .ticker-box{background:var(--surface); border:1px solid var(--line); border-radius:8px; padding:16px 18px;}
+    .ticker-box h3{font-family:'Fraunces',serif; font-size:16px; margin:0 0 12px; padding-bottom:10px; border-bottom:2px solid var(--ink);}
+    .ti{padding:9px 0; border-bottom:1px solid var(--line);}
+    .ti:last-child{border-bottom:none;}
+    .ti .tm{font-size:10px; text-transform:uppercase; letter-spacing:.5px; color:var(--ink-faint); margin-bottom:3px;}
+    .ti a{font-size:13px; font-weight:500; color:var(--ink); text-decoration:none; line-height:1.4;}
+    .ti a:hover{color:var(--brand);}
+
+    .mini{background:var(--surface); border:1px solid var(--line); border-left:3px solid var(--brand); border-radius:6px; padding:13px 15px; height:100%;}
+    .mini .mm{font-size:10px; text-transform:uppercase; letter-spacing:.5px; color:var(--ink-faint); margin-bottom:5px;}
+    .mini a{font-family:'Fraunces',serif; font-size:14.5px; font-weight:500; color:var(--ink); text-decoration:none; line-height:1.35;}
+    .mini a:hover{color:var(--brand);}
 </style>
 """, unsafe_allow_html=True)
 
@@ -929,6 +1045,38 @@ def mostra_hub_legale(lista_articoli: List[Dict], tipo_bacheca: str):
                 st.markdown(st.session_state.ai_summaries[link])
             st.write("")
 
+def _stile_categoria(tipo_atto: Optional[str]) -> Dict[str, str]:
+    """Ritorna classe CSS, glifo ed etichetta per il trattamento grafico per categoria."""
+    t = (tipo_atto or "provvedimento").lower()
+    if t == "sentenza":
+        return {"cls": "sent", "glyph": "⚖", "label": "Sentenza"}
+    if t == "news":
+        return {"cls": "news", "glyph": "▤", "label": "News"}
+    return {"cls": "provv", "glyph": "§", "label": "Provvedimento"}
+
+def _pp_card(art: Dict, lead: bool = False) -> str:
+    """Costruisce l'HTML di una card della prima pagina (apertura o griglia)."""
+    s = _stile_categoria(art.get('tipo_atto'))
+    tema = html.escape(str(art.get('tema') or art.get('area') or 'Generale'))
+    fonte = html.escape(str(art.get('fonte') or ''))
+    titolo = html.escape(str(art.get('titolo') or ''))
+    link = html.escape(str(art.get('link') or ''), quote=True)
+    riassunto = html.escape(str(art.get('riassunto_ai') or art.get('preview') or ''))
+    badge = '<span class="badge-ril badge-ril-alta" style="margin-left:8px;">Alta</span>' if art.get('rilevanza') == 'alta' else ''
+    thumb_cls = "thumb-lead" if lead else ""
+    title_cls = "pp-title-lead" if lead else "pp-title-grid"
+    sum_cls = "pp-sum-lead" if lead else "pp-sum-grid"
+    return (
+        f'<div class="pp-card">'
+        f'<div class="thumb thumb-{s["cls"]} {thumb_cls}"><span class="glyph">{s["glyph"]}</span>'
+        f'<span class="src-chip">{fonte}</span></div>'
+        f'<div class="pp-body">'
+        f'<div class="pp-kicker-wrap"><span class="kicker k-{s["cls"]}">{s["label"]} · {tema}</span></div>'
+        f'<a href="{link}" target="_blank" class="pp-title {title_cls}">{titolo}{badge}</a>'
+        f'<div class="pp-sum {sum_cls}">{riassunto}</div>'
+        f'</div></div>'
+    )
+
 def _semaforo_fonte(s: Dict) -> Tuple[str, str]:
     """Calcola il semaforo di salute di una fonte.
     Ritorna (emoji, descrizione)."""
@@ -962,37 +1110,56 @@ if pagina_pulita == "🏠 Dashboard":
         'Legal Radar<span style="color:var(--brand);">.</span></div>'
         '<div style="font-size:12px; text-transform:uppercase; letter-spacing:2px; color:var(--brand); font-weight:700;">Regulatory Intelligence</div>'
         '</div>'
-        f'<div style="font-size:13px; color:var(--ink-soft); font-style:italic; margin-bottom:24px;">Rassegna per {e_user} · {oggi}</div>'
+        f'<div style="font-size:13px; color:var(--ink-soft); font-style:italic; margin-bottom:20px;">La tua prima pagina · {oggi}</div>'
     )
     st.markdown(masthead_html, unsafe_allow_html=True)
-    
-    metriche = db.estrai_metriche_dashboard(st.session_state.user['id'])
-    c1, c2, c3 = st.columns(3)
-    c1.metric("📚 Archivio Storico Comune", f"{metriche['articoli']} articoli")
-    c2.metric("📡 Canali Radar Attivi", f"{metriche['fonti']} fonti")
-    c3.metric("🔖 La Tua Rassegna", f"{metriche['salvati']} salvati")
-    
-    st.divider()
-    st.subheader("🔥 Ultimi Alert Urgenti Rilevati (Personalizzati)")
-    
-    # MODIFICA: Gli alert della Home ora seguono i filtri personali dell'utente
-    alert_urgenti = db.estrai_ultimi_alert_urgenti(st.session_state.user['id'])
-    if alert_urgenti:
-        for al in alert_urgenti:
-            a_fonte = html.escape(str(al.get('fonte') or ''))
-            a_area = html.escape(str(al.get('area') or ''))
-            a_titolo = html.escape(str(al.get('titolo') or ''))
-            a_link = html.escape(str(al.get('link') or ''), quote=True)
-            alert_html = (
-                '<div style="background: white; border-radius: 8px; padding: 15px; border: 1px solid #eaeaea; border-left: 4px solid #d32f2f; margin-bottom: 10px;">'
-                '<span style="font-size: 11px; font-weight: bold; color: #d32f2f; text-transform: uppercase;">⚠️ ALERT</span> | '
-                f'<span style="font-size: 12px; color: #666;">{a_fonte} ({a_area})</span><br>'
-                f'<a href="{a_link}" target="_blank" style="font-weight: 600; color: #1a1a1a; text-decoration: none; font-size: 15px;">{a_titolo}</a>'
-                '</div>'
-            )
-            st.markdown(alert_html, unsafe_allow_html=True)
+
+    in_evidenza = db.estrai_in_evidenza(st.session_state.user['id'], limite=4)
+
+    # Stato vuoto curato (utile soprattutto dopo un reset a t0)
+    if not in_evidenza:
+        st.info("Nessun articolo ancora in archivio. Lancia una sincronizzazione dalla barra laterale per popolare la prima pagina.")
     else:
-        st.info("Nessun alert urgente rilevato dalle tue fonti attive.")
+        # --- APERTURA + ULTIM'ORA ---
+        col_lead, col_ticker = st.columns([1.5, 1])
+        with col_lead:
+            st.markdown(_pp_card(in_evidenza[0], lead=True), unsafe_allow_html=True)
+        with col_ticker:
+            ultima_ora = db.estrai_ultima_ora(st.session_state.user['id'], limite=5)
+            voci = ""
+            for al in ultima_ora:
+                tm = html.escape(str(al.get('fonte') or ''))
+                tt = html.escape(str(al.get('titolo') or ''))
+                lk = html.escape(str(al.get('link') or ''), quote=True)
+                voci += f'<div class="ti"><div class="tm">{tm}</div><a href="{lk}" target="_blank">{tt}</a></div>'
+            st.markdown(f'<div class="ticker-box"><h3>Ultim\'ora</h3>{voci}</div>', unsafe_allow_html=True)
+
+        # --- GRIGLIA IN EVIDENZA (i successivi 3) ---
+        secondari = in_evidenza[1:4]
+        if secondari:
+            st.markdown('<div style="margin-top:28px;"></div>', unsafe_allow_html=True)
+            st.markdown('<div style="display:flex; align-items:center; gap:12px; margin-bottom:14px;"><h2 style="font-family:Fraunces,serif; font-size:20px; margin:0;">In evidenza</h2><span style="height:2px; background:linear-gradient(90deg,var(--brand-soft),transparent); flex:1;"></span></div>', unsafe_allow_html=True)
+            cols = st.columns(len(secondari))
+            for col, art in zip(cols, secondari):
+                with col:
+                    st.markdown(_pp_card(art, lead=False), unsafe_allow_html=True)
+
+        # --- BLOCCHI TEMATICI (i temi più presenti) ---
+        temi_top = db.temi_piu_presenti(st.session_state.user['id'], limite=3)
+        for tema in temi_top:
+            articoli_tema = db.estrai_per_tema_blocco(st.session_state.user['id'], tema, limite=3)
+            if not articoli_tema:
+                continue
+            st.markdown('<div style="margin-top:30px;"></div>', unsafe_allow_html=True)
+            st.markdown(f'<div style="display:flex; align-items:center; gap:12px; margin-bottom:14px;"><h2 style="font-family:Fraunces,serif; font-size:20px; margin:0;">{html.escape(str(tema))}</h2><span style="height:2px; background:linear-gradient(90deg,var(--brand-soft),transparent); flex:1;"></span></div>', unsafe_allow_html=True)
+            cols = st.columns(len(articoli_tema))
+            for col, art in zip(cols, articoli_tema):
+                with col:
+                    s = _stile_categoria(art.get('tipo_atto'))
+                    mm = html.escape(f"{art.get('fonte','')} · {s['label'].lower()}")
+                    tt = html.escape(str(art.get('titolo') or ''))
+                    lk = html.escape(str(art.get('link') or ''), quote=True)
+                    st.markdown(f'<div class="mini"><div class="mm">{mm}</div><a href="{lk}" target="_blank">{tt}</a></div>', unsafe_allow_html=True)
 
 elif pagina_pulita in ["🏛️ Provvedimenti", "⚖️ Sentenze", "📰 News"]:
     # Mappa la voce di menu alla categoria AI
