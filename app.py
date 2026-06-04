@@ -328,12 +328,19 @@ class LegalRadarDB:
         """Estrae articoli per categoria AI (sentenza/provvedimento/news), con filtro tema opzionale,
         rispettando le fonti spente dall'utente e portando stato letto + tipo fonte."""
         query = """
-            SELECT a.*, COALESCE(uas.letto, FALSE) AS letto, src.tipo_fonte
+            SELECT a.*, COALESCE(uas.letto, FALSE) AS letto, src.tipo_fonte,
+                   COALESCE(
+                       a.tipo_atto,
+                       CASE WHEN LOWER(COALESCE(src.tipo_fonte,'')) = 'editoriale' THEN 'news' ELSE 'provvedimento' END
+                   ) AS tipo_atto_eff
             FROM articles a
             LEFT JOIN user_article_status uas
                 ON uas.article_id = a.id AND uas.user_id = %s
             LEFT JOIN sources src ON src.nome = a.fonte
-            WHERE a.tipo_atto = %s
+            WHERE COALESCE(
+                      a.tipo_atto,
+                      CASE WHEN LOWER(COALESCE(src.tipo_fonte,'')) = 'editoriale' THEN 'news' ELSE 'provvedimento' END
+                  ) = %s
             AND a.fonte NOT IN (
                 SELECT s.nome FROM sources s
                 JOIN user_source_preferences usp ON s.id = usp.source_id
@@ -684,6 +691,22 @@ def genera_microriassunto_groq(titolo: str, preview: str) -> Dict[str, Optional[
         logging.error("Microriassunto fallito: %s", e)
         return vuoto
 
+def _classifica_con_fallback(meta: Dict, fonte: Dict) -> Dict:
+    """Garantisce che tipo_atto e tema non siano MAI vuoti.
+    Se l'AI non ha classificato, deduce dal tipo della fonte e dall'area."""
+    tipo_atto = meta.get("tipo_atto")
+    if not tipo_atto:
+        # Fallback deterministico dal tipo fonte: editoriale -> news, autorità/ufficiale -> provvedimento
+        tf = (fonte.get('tipo_fonte') or 'Ufficiale').lower()
+        tipo_atto = "news" if tf == "editoriale" else "provvedimento"
+    tema = meta.get("tema") or fonte.get('area') or "Generale"
+    return {
+        "riassunto": meta.get("riassunto"),
+        "rilevanza": meta.get("rilevanza") or "media",
+        "tipo_atto": tipo_atto,
+        "tema": tema,
+    }
+
 def _ingest_rss(f: Dict) -> List[Dict]:
     """Strategia di ingestion per fonti con feed RSS."""
     risultati = []
@@ -691,8 +714,8 @@ def _ingest_rss(f: Dict) -> List[Dict]:
     for entry in feed.entries[:5]:
         sommario = entry.summary if hasattr(entry, 'summary') else ""
         preview = BeautifulSoup(sommario, "html.parser").get_text()[:250] + "..."
-        # Pre-analisi AI: riassunto + rilevanza + tipo_atto + tema (fail-safe se l'AI non risponde)
-        meta = genera_microriassunto_groq(entry.title, preview)
+        # Pre-analisi AI + fallback garantito (tipo_atto e tema mai vuoti)
+        meta = _classifica_con_fallback(genera_microriassunto_groq(entry.title, preview), f)
         risultati.append({
             "Titolo": entry.title, "Link": entry.link, "Preview": preview,
             "Macro": f['macro'], "Area": f['area'], "Fonte": f['nome'],
