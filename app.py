@@ -4,6 +4,7 @@ import feedparser
 import time
 import requests
 import os
+import re
 import logging
 from contextlib import contextmanager
 from bs4 import BeautifulSoup
@@ -13,14 +14,14 @@ import psycopg2.errors
 import psycopg2.extras
 import bcrypt
 from typing import List, Dict, Tuple, Optional
- 
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
- 
+
 # --- 1. CLASSE ARCHITETTURALE DATABASE (POSTGRESQL MULTI-TENANT) ---
 class LegalRadarDB:
     def __init__(self, db_url: str):
         self.db_url = db_url
- 
+
     # --- CONNESSIONE: context manager con commit/rollback/close GARANTITI ---
     @contextmanager
     def get_cursor(self, dict_cursor: bool = False):
@@ -36,7 +37,7 @@ class LegalRadarDB:
         finally:
             cur.close()
             conn.close()
- 
+
     def init_db(self) -> None:
         commands = (
             """
@@ -84,11 +85,22 @@ class LegalRadarDB:
                 PRIMARY KEY (user_id, source_id)
             )
             """,
+            # --- AGGIUNTA TABELLA: STATO LETTO/NON LETTO PER UTENTE ---
+            """
+            CREATE TABLE IF NOT EXISTS user_article_status (
+                user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+                article_id INTEGER REFERENCES articles(id) ON DELETE CASCADE,
+                letto BOOLEAN DEFAULT FALSE,
+                letto_il TIMESTAMP,
+                PRIMARY KEY (user_id, article_id)
+            )
+            """,
             # --- INDICI PER PERFORMANCE (idempotenti) ---
             "CREATE INDEX IF NOT EXISTS idx_articles_macro_data ON articles(macro, data_scansione DESC)",
             "CREATE INDEX IF NOT EXISTS idx_articles_fonte ON articles(fonte)",
             "CREATE INDEX IF NOT EXISTS idx_bookmarks_user ON bookmarks(user_id)",
             "CREATE INDEX IF NOT EXISTS idx_usp_user ON user_source_preferences(user_id)",
+            "CREATE INDEX IF NOT EXISTS idx_uas_user_letto ON user_article_status(user_id, letto)",
         )
         try:
             with self.get_cursor() as cur:
@@ -97,7 +109,7 @@ class LegalRadarDB:
         except Exception as e:
             logging.error("Errore critico di connessione al database: %s", e)
             st.error(f"Errore critico di connessione al database: {e}")
- 
+
     def registra_utente(self, username: str, password: str) -> bool:
         hashed = bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
         try:
@@ -109,7 +121,7 @@ class LegalRadarDB:
         except Exception as e:
             logging.error("Errore registrazione utente: %s", e)
             return False
- 
+
     def verifica_utente(self, username: str, password: str) -> Optional[Dict]:
         with self.get_cursor(dict_cursor=True) as cur:
             cur.execute("SELECT * FROM users WHERE username = %s", (username.strip(),))
@@ -117,13 +129,13 @@ class LegalRadarDB:
         if user and bcrypt.checkpw(password.encode('utf-8'), user['password_hash'].encode('utf-8')):
             return dict(user)
         return None
- 
+
     def carica_fonti(self) -> List[Dict]:
         with self.get_cursor(dict_cursor=True) as cur:
             cur.execute("SELECT * FROM sources ORDER BY nome ASC")
             fonti = cur.fetchall()
         return [dict(f) for f in fonti]
- 
+
     # --- AGGIUNTA: LETTURA DELLE FONTI CON STATO DI ACCENSIONE UTENTE ---
     def carica_fonti_con_preferenze(self, user_id: int) -> List[Dict]:
         query = """
@@ -136,7 +148,7 @@ class LegalRadarDB:
             cur.execute(query, (user_id,))
             fonti = cur.fetchall()
         return [dict(f) for f in fonti]
- 
+
     # --- AGGIUNTA: SALVATAGGIO ACCENSIONE/SPEGNIMENTO PERSONALE ---
     def imposta_preferenza_fonte(self, user_id: int, source_id: int, is_active: bool) -> None:
         query = """
@@ -147,7 +159,7 @@ class LegalRadarDB:
         """
         with self.get_cursor() as cur:
             cur.execute(query, (user_id, source_id, is_active))
- 
+
     def aggiungi_fonte(self, nome: str, url: str, area: str, macro: str) -> bool:
         try:
             with self.get_cursor() as cur:
@@ -156,11 +168,11 @@ class LegalRadarDB:
         except Exception as e:
             logging.error("Errore aggiunta fonte: %s", e)
             return False
- 
+
     def rimuovi_fonte(self, fonte_id: int) -> None:
         with self.get_cursor() as cur:
             cur.execute("DELETE FROM sources WHERE id = %s", (fonte_id,))
- 
+
     def salva_articoli_storico(self, articoli_lista: List[Dict]) -> None:
         query = """
             INSERT INTO articles (titolo, link, preview, macro, area, fonte) 
@@ -173,47 +185,53 @@ class LegalRadarDB:
         ]
         with self.get_cursor() as cur:
             cur.executemany(query, params)
- 
-    # --- MODIFICA: ESTRAZIONE ARCHIVIO FILTRATO SULLE PREFERENZE UTENTE ---
+
+    # --- MODIFICA: ESTRAZIONE ARCHIVIO FILTRATO SULLE PREFERENZE UTENTE + STATO LETTO ---
     def estrai_archivio(self, filtro_macro: str, user_id: int, ricerca_testo: str = "") -> List[Dict]:
         query = """
-            SELECT * FROM articles 
-            WHERE macro = %s 
-            AND fonte NOT IN (
+            SELECT a.*, COALESCE(uas.letto, FALSE) AS letto
+            FROM articles a
+            LEFT JOIN user_article_status uas
+                ON uas.article_id = a.id AND uas.user_id = %s
+            WHERE a.macro = %s 
+            AND a.fonte NOT IN (
                 SELECT s.nome FROM sources s
                 JOIN user_source_preferences usp ON s.id = usp.source_id
                 WHERE usp.user_id = %s AND usp.is_active = FALSE
             )
         """
-        params = [filtro_macro, user_id]
+        params = [user_id, filtro_macro, user_id]
         if ricerca_testo:
-            query += " AND (titolo ILIKE %s OR preview ILIKE %s OR area ILIKE %s)"
+            query += " AND (a.titolo ILIKE %s OR a.preview ILIKE %s OR a.area ILIKE %s)"
             text_param = f"%{ricerca_testo}%"
             params.extend([text_param, text_param, text_param])
-        query += " ORDER BY data_scansione DESC LIMIT 100"
+        query += " ORDER BY a.data_scansione DESC LIMIT 100"
         with self.get_cursor(dict_cursor=True) as cur:
             cur.execute(query, params)
             articoli = cur.fetchall()
         return [dict(a) for a in articoli]
- 
+
     def aggiungi_bookmark(self, user_id: int, article_id: int) -> None:
         try:
             with self.get_cursor() as cur:
                 cur.execute("INSERT INTO bookmarks (user_id, article_id) VALUES (%s, %s) ON CONFLICT DO NOTHING", (user_id, article_id))
         except Exception as e:
             logging.error("Errore aggiunta bookmark: %s", e)
- 
+
     def rimuovi_bookmark(self, user_id: int, article_id: int) -> None:
         with self.get_cursor() as cur:
             cur.execute("DELETE FROM bookmarks WHERE user_id = %s AND article_id = %s", (user_id, article_id))
- 
+
     def estrai_bookmarks(self, user_id: int, ricerca_testo: str = "") -> List[Dict]:
         query = """
-            SELECT a.* FROM articles a 
+            SELECT a.*, COALESCE(uas.letto, FALSE) AS letto
+            FROM articles a 
             JOIN bookmarks b ON a.id = b.article_id 
+            LEFT JOIN user_article_status uas
+                ON uas.article_id = a.id AND uas.user_id = %s
             WHERE b.user_id = %s
         """
-        params = [user_id]
+        params = [user_id, user_id]
         if ricerca_testo:
             query += " AND (a.titolo ILIKE %s OR a.preview ILIKE %s)"
             text_param = f"%{ricerca_testo}%"
@@ -223,29 +241,75 @@ class LegalRadarDB:
             cur.execute(query, params)
             salvati = cur.fetchall()
         return [dict(s) for s in salvati]
- 
+
     def check_bookmark_esiste(self, user_id: int, article_id: int) -> bool:
         with self.get_cursor() as cur:
             cur.execute("SELECT 1 FROM bookmarks WHERE user_id = %s AND article_id = %s", (user_id, article_id))
             esiste = cur.fetchone() is not None
         return esiste
- 
+
     def estrai_metriche_dashboard(self, user_id: int) -> Dict[str, int]:
         with self.get_cursor() as cur:
             cur.execute("SELECT COUNT(*) FROM articles")
             tot_articoli = cur.fetchone()[0]
- 
+
             cur.execute("SELECT COUNT(*) FROM sources")
             tot_fonti = cur.fetchone()[0]
- 
+
             cur.execute("SELECT COUNT(*) FROM bookmarks WHERE user_id = %s", (user_id,))
             tot_salvati = cur.fetchone()[0]
         return {"articoli": tot_articoli, "fonti": tot_fonti, "salvati": tot_salvati}
- 
+
+    # --- AGGIUNTA: GESTIONE STATO LETTO/NON LETTO ---
+    def segna_letto(self, user_id: int, article_id: int) -> None:
+        """Marca un articolo come letto. Idempotente: preserva la data di prima lettura."""
+        query = """
+            INSERT INTO user_article_status (user_id, article_id, letto, letto_il)
+            VALUES (%s, %s, TRUE, CURRENT_TIMESTAMP)
+            ON CONFLICT (user_id, article_id)
+            DO UPDATE SET letto = TRUE,
+                          letto_il = COALESCE(user_article_status.letto_il, CURRENT_TIMESTAMP)
+        """
+        with self.get_cursor() as cur:
+            cur.execute(query, (user_id, article_id))
+
+    def segna_tutti_letti(self, user_id: int, filtro_macro: Optional[str] = None) -> None:
+        """Azzera l'arretrato: marca letti tutti gli articoli (o solo di una macro-categoria)."""
+        query = """
+            INSERT INTO user_article_status (user_id, article_id, letto, letto_il)
+            SELECT %s, a.id, TRUE, CURRENT_TIMESTAMP FROM articles a
+            WHERE (%s IS NULL OR a.macro = %s)
+            ON CONFLICT (user_id, article_id)
+            DO UPDATE SET letto = TRUE,
+                          letto_il = COALESCE(user_article_status.letto_il, CURRENT_TIMESTAMP)
+        """
+        with self.get_cursor() as cur:
+            cur.execute(query, (user_id, filtro_macro, filtro_macro))
+
+    def conta_non_letti(self, user_id: int) -> Dict[str, int]:
+        """Conta i non-letti per macro-categoria, rispettando le fonti spente dall'utente."""
+        query = """
+            SELECT a.macro, COUNT(*) AS n
+            FROM articles a
+            LEFT JOIN user_article_status uas
+                ON uas.article_id = a.id AND uas.user_id = %s
+            WHERE COALESCE(uas.letto, FALSE) = FALSE
+            AND a.fonte NOT IN (
+                SELECT s.nome FROM sources s
+                JOIN user_source_preferences usp ON s.id = usp.source_id
+                WHERE usp.user_id = %s AND usp.is_active = FALSE
+            )
+            GROUP BY a.macro
+        """
+        with self.get_cursor(dict_cursor=True) as cur:
+            cur.execute(query, (user_id, user_id))
+            righe = cur.fetchall()
+        return {r['macro']: r['n'] for r in righe}
+
     # --- MODIFICA: ANCHE GLI ALERT DELLA HOME ESCLUDONO LE FONTI SPENTE ---
     def estrai_ultimi_alert_urgenti(self, user_id: int) -> List[Dict]:
         keywords = ['%sanzion%', '%ordinanza%', '%condanna%', '%violazion%', '%scadenza%', '%obbligo%', '%divieto%', '%sentenza%']
- 
+
         query = """
             SELECT * FROM articles 
             WHERE ({}) 
@@ -256,19 +320,19 @@ class LegalRadarDB:
             )
             ORDER BY data_scansione DESC LIMIT 4
         """.format(" OR ".join(["titolo ILIKE %s" for _ in keywords]))
- 
+
         params = keywords + [user_id]
         with self.get_cursor(dict_cursor=True) as cur:
             cur.execute(query, params)
             alert = cur.fetchall()
         return [dict(a) for a in alert]
- 
+
 # --- 2. CONFIGURAZIONE INIZIALE ---
 DB_URL = st.secrets.get("DB_URL", "")
 if not DB_URL:
     st.error("Rilevamento fallito: inserisci DB_URL nei Secrets di Streamlit.")
     st.stop()
- 
+
 DEFAULT_FONTI = [
     {"nome": "Agenzia Entrate", "url": "https://www.agenziaentrate.gov.it/portale/web/guest/rss/novita", "area": "Diritto Tributario", "macro": "Leggi & Normativa"},
     {"nome": "Garante Privacy", "url": "https://www.garanteprivacy.it/o/gpdp-rss/rss?c=10490", "area": "Privacy", "macro": "Provvedimenti & Sentenze"},
@@ -279,7 +343,7 @@ DEFAULT_FONTI = [
     {"nome": "CGUE", "url": "https://curia.europa.eu/site/rss.jsp?lang=it&secondLang=en", "area": "Giurisprudenza UE", "macro": "Provvedimenti & Sentenze"},
     {"nome": "Altalex", "url": "https://www.altalex.com/rss", "area": "Legale Generale", "macro": "News & Aggiornamenti"}
 ]
- 
+
 # --- ISTANZA DB CACHATA: init_db() e seeding fonti girano UNA SOLA VOLTA per deploy ---
 @st.cache_resource
 def get_db() -> LegalRadarDB:
@@ -289,12 +353,12 @@ def get_db() -> LegalRadarDB:
         for f in DEFAULT_FONTI:
             db.aggiungi_fonte(f['nome'], f['url'], f['area'], f['macro'])
     return db
- 
+
 db = get_db()
- 
+
 if 'user' not in st.session_state: st.session_state.user = None
 if 'ai_summaries' not in st.session_state: st.session_state.ai_summaries = {}
- 
+
 # --- 3. STILE GRAFICO ---
 st.markdown("""
 <style>
@@ -303,6 +367,8 @@ st.markdown("""
     div.stButton > button[kind="primary"] { background-color: #ff6600; color: white; border: none; font-weight: 600; border-radius: 8px;}
     div.stButton > button[kind="primary"]:hover { background-color: #e65c00; box-shadow: 0 4px 8px rgba(255, 102, 0, 0.3); }
     .radar-card { background: white; border-radius: 12px; padding: 24px; border: 1px solid #eaeaea; margin-bottom: 20px; border-left: 6px solid #ff6600; box-shadow: 0 2px 8px rgba(0,0,0,0.04); }
+    .radar-card-letto { background: #fbfbfc; border-radius: 12px; padding: 24px; border: 1px solid #eee; margin-bottom: 20px; border-left: 6px solid #cfd3da; box-shadow: none; opacity: 0.78; }
+    .badge-nuovo { display: inline-block; padding: 3px 9px; border-radius: 20px; font-size: 10px; font-weight: 800; text-transform: uppercase; margin-left: 8px; background: #ff6600; color: white; letter-spacing: 0.5px; vertical-align: middle; }
     .card-title { font-size: 19px; font-weight: 700; color: #1a1a1a; text-decoration: none; margin-bottom: 12px; display: block; line-height: 1.3; }
     .card-title:hover { color: #ff6600; }
     .card-preview { font-size: 14px; color: #4a4a4a; margin-bottom: 15px; line-height: 1.6; }
@@ -312,7 +378,7 @@ st.markdown("""
     .tag-fonte { background: #fff3eb; color: #ff6600; border: 1px solid #ffd6b3;}
 </style>
 """, unsafe_allow_html=True)
- 
+
 # --- 4. MOTORE LOGICO E SCRAPING ---
 def estrai_testo_pulito(url: str) -> str:
     if url.lower().endswith(('.pdf', '.zip', '.doc')): return ""
@@ -323,7 +389,7 @@ def estrai_testo_pulito(url: str) -> str:
         paragraphs = soup.find_all(['p', 'div'])
         return " ".join([p.get_text(strip=True) for p in paragraphs if len(p.get_text(strip=True)) > 45])[:6000]
     except: return ""
- 
+
 # --- MODIFICA: POTENZIAMENTO PROMPT AI VERTICALE (Punto 2) ---
 def genera_sintesi_groq(url: str, preview_text: str) -> str:
     raw_key = st.secrets.get("GROQ_API_KEY", "").strip()
@@ -359,7 +425,7 @@ def genera_sintesi_groq(url: str, preview_text: str) -> str:
         if r.status_code == 200: return r.json()['choices'][0]['message']['content'].strip()
         return f"⚠️ Errore AI ({r.status_code})"
     except: return "⚠️ Connessione AI fallita."
- 
+
 def sincronizza_radar_in_database() -> None:
     fonti = db.carica_fonti()
     articoli_scovati = []
@@ -376,7 +442,7 @@ def sincronizza_radar_in_database() -> None:
         except: continue
     if articoli_scovati:
         db.salva_articoli_storico(articoli_scovati)
- 
+
 # --- 5. SCHERMATA DI AUTENTICAZIONE ---
 if st.session_state.user is None:
     st.title("⚖️ Legal Radar | Autenticazione")
@@ -405,20 +471,27 @@ if st.session_state.user is None:
                 else:
                     st.error("Credenziali errate.")
     st.stop()
- 
+
 # --- 6. INTERFACCIA UTENTE AUTENTICATO ---
 with st.sidebar:
     st.title("⚖️ Legal Radar")
     st.write(f"👤 Utente: **{st.session_state.user['username']}**")
-    
-    pagina = st.radio("Navigazione", [
+
+    # Conteggi non-letti per badge nella navigazione
+    non_letti = db.conta_non_letti(st.session_state.user['id'])
+    def _lbl(emoji_label: str, macro: str) -> str:
+        n = non_letti.get(macro, 0)
+        return f"{emoji_label} ({n})" if n else emoji_label
+
+    opzioni_nav = [
         "🏠 Dashboard",
-        "📖 Leggi & Normativa", 
-        "🏛️ Provvedimenti & Sentenze", 
-        "📰 News & Aggiornamenti",
+        _lbl("📖 Leggi & Normativa", "Leggi & Normativa"),
+        _lbl("🏛️ Provvedimenti & Sentenze", "Provvedimenti & Sentenze"),
+        _lbl("📰 News & Aggiornamenti", "News & Aggiornamenti"),
         "🔖 I Miei Salvati",
         "⚙️ Gestione Fonti"
-    ])
+    ]
+    pagina = st.radio("Navigazione", opzioni_nav)
     
     st.divider()
     if st.button("🔄 Sincronizza ed Espandi Archivio", type="primary", use_container_width=True):
@@ -430,7 +503,7 @@ with st.sidebar:
     if st.button("🚪 Esci", use_container_width=True):
         st.session_state.user = None
         st.rerun()
- 
+
 def mostra_hub_legale(lista_articoli: List[Dict], tipo_bacheca: str):
     if not lista_articoli:
         st.info("Nessun articolo trovato in questo archivio storico filtrato.")
@@ -438,18 +511,21 @@ def mostra_hub_legale(lista_articoli: List[Dict], tipo_bacheca: str):
         
     for art in lista_articoli:
         with st.container():
+            e_letto = art.get('letto', False)
+            classe_card = "radar-card-letto" if e_letto else "radar-card"
+            badge_nuovo = "" if e_letto else '<span class="badge-nuovo">Nuovo</span>'
             st.markdown(f"""
-            <div class="radar-card">
+            <div class="{classe_card}">
                 <div>
                     <span class="meta-tag tag-area">{art['area']}</span>
                     <span class="meta-tag tag-fonte">{art['fonte']}</span>
                 </div>
-                <a href="{art['link']}" target="_blank" class="card-title">{art['titolo']}</a>
+                <a href="{art['link']}" target="_blank" class="card-title">{art['titolo']}{badge_nuovo}</a>
                 <div class="card-preview">{art['preview']}</div>
             </div>
             """, unsafe_allow_html=True)
             
-            c1, c2 = st.columns([1, 3])
+            c1, c2, c3 = st.columns([1, 1, 2])
             with c1:
                 if tipo_bacheca == "bookmarks":
                     if st.button("🗑️ Rimuovi dai preferiti", key=f"rem_{art['id']}"):
@@ -463,6 +539,14 @@ def mostra_hub_legale(lista_articoli: List[Dict], tipo_bacheca: str):
                             db.aggiungi_bookmark(st.session_state.user['id'], art['id'])
                             st.success("Articolo salvato!")
                             st.rerun()
+            with c2:
+                # Bottone esplicito per marcare letto (copre il caso del link esterno)
+                if not e_letto:
+                    if st.button("✓ Segna letto", key=f"read_{art['id']}"):
+                        db.segna_letto(st.session_state.user['id'], art['id'])
+                        st.rerun()
+                else:
+                    st.caption("✓ Letto")
             
             link = art['link']
             if link in st.session_state.ai_summaries:
@@ -470,19 +554,24 @@ def mostra_hub_legale(lista_articoli: List[Dict], tipo_bacheca: str):
                 st.markdown("<div class='card-summary'>🤖 <b>Analisi Strategica Legal-Tech:</b></div>", unsafe_allow_html=True)
                 st.markdown(st.session_state.ai_summaries[link])
             else:
-                with c2:
+                with c3:
                     if st.button("✨ Genera Analisi AI Strategica", key=f"ai_{art['id']}"):
                         with st.spinner("L'AI sta conducendo l'analisi verticale per i comparatori..."):
                             st.session_state.ai_summaries[link] = genera_sintesi_groq(link, art['preview'])
+                            # Generare l'analisi implica aver "consumato" l'articolo: marca letto
+                            db.segna_letto(st.session_state.user['id'], art['id'])
                             st.rerun()
             st.write("")
- 
+
+# Le label di navigazione possono avere un suffisso conteggio "(3)": lo rimuovo per il routing
+pagina_pulita = re.sub(r"\s*\(\d+\)$", "", pagina)
+
 ricerca = ""
-if pagina not in ["⚙️ Gestione Fonti", "🏠 Dashboard"]:
+if pagina_pulita not in ["⚙️ Gestione Fonti", "🏠 Dashboard"]:
     ricerca = st.text_input("🔍 Cerca parole chiave nell'archivio storico...")
- 
+
 # --- ROUTING PAGINE ---
-if pagina == "🏠 Dashboard":
+if pagina_pulita == "🏠 Dashboard":
     st.title(f"Benvenuto nel tuo Hub, {st.session_state.user['username']}! 👋")
     st.caption(f"Stato dell'Intelligence Normativa al {datetime.now().strftime('%d/%m/%Y')}")
     st.write("")
@@ -509,20 +598,26 @@ if pagina == "🏠 Dashboard":
             """, unsafe_allow_html=True)
     else:
         st.info("Nessun alert urgente rilevato dalle tue fonti attive.")
- 
-elif pagina in ["📖 Leggi & Normativa", "🏛️ Provvedimenti & Sentenze", "📰 News & Aggiornamenti"]:
-    macro_categoria = pagina.replace("📖 ", "").replace("🏛️ ", "").replace("📰 ", "")
-    st.header(macro_categoria)
+
+elif pagina_pulita in ["📖 Leggi & Normativa", "🏛️ Provvedimenti & Sentenze", "📰 News & Aggiornamenti"]:
+    macro_categoria = pagina_pulita.replace("📖 ", "").replace("🏛️ ", "").replace("📰 ", "")
+    col_h, col_btn = st.columns([3, 1])
+    col_h.header(macro_categoria)
+    with col_btn:
+        st.write("")
+        if st.button("✓ Segna tutto come letto", key=f"readall_{macro_categoria}", use_container_width=True):
+            db.segna_tutti_letti(st.session_state.user['id'], filtro_macro=macro_categoria)
+            st.rerun()
     # MODIFICA: Passiamo l'ID utente per nascondere gli articoli delle fonti spente
     dati_db = db.estrai_archivio(filtro_macro=macro_categoria, user_id=st.session_state.user['id'], ricerca_testo=ricerca)
     mostra_hub_legale(dati_db, tipo_bacheca="radar")
- 
-elif pagina == "🔖 I Miei Salvati":
+
+elif pagina_pulita == "🔖 I Miei Salvati":
     st.header("I Miei Articoli Salvati")
     dati_salvati = db.estrai_bookmarks(user_id=st.session_state.user['id'], ricerca_testo=ricerca)
     mostra_hub_legale(dati_salvati, tipo_bacheca="bookmarks")
- 
-elif pagina == "⚙️ Gestione Fonti":
+
+elif pagina_pulita == "⚙️ Gestione Fonti":
     st.header("Database & Personalizzazione Fonti")
     
     # MODIFICA: SEZIONE 1 - INTERFACCIA ON/OFF PERSONALE (Punto 1)
@@ -572,4 +667,3 @@ elif pagina == "⚙️ Gestione Fonti":
             st.success("Fonte rimossa dal sistema.")
             st.rerun()
         st.write("---")
-
