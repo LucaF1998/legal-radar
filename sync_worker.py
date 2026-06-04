@@ -81,6 +81,14 @@ def _ingest_rss(f: Dict) -> List[Tuple]:
         sommario = entry.summary if hasattr(entry, 'summary') else ""
         preview = BeautifulSoup(sommario, "html.parser").get_text()[:250] + "..."
         riassunto, rilevanza, tipo_atto, tema = genera_microriassunto(entry.title, preview)
+        # Fallback garantito: tipo_atto e tema non devono MAI essere vuoti
+        if not tipo_atto:
+            tf = (f.get('tipo_fonte') or 'Ufficiale').lower()
+            tipo_atto = "news" if tf == "editoriale" else "provvedimento"
+        if not tema:
+            tema = f.get('area') or "Generale"
+        if not rilevanza:
+            rilevanza = "media"
         risultati.append((
             entry.title,
             entry.link,
