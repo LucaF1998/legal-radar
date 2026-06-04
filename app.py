@@ -75,7 +75,9 @@ class LegalRadarDB:
                 fonte VARCHAR(150),
                 data_scansione TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 riassunto_ai TEXT,
-                rilevanza VARCHAR(20)
+                rilevanza VARCHAR(20),
+                tipo_atto VARCHAR(30),
+                tema VARCHAR(100)
             )
             """,
             """
@@ -118,6 +120,9 @@ class LegalRadarDB:
             "ALTER TABLE sources ADD COLUMN IF NOT EXISTS ultimo_messaggio TEXT",
             "ALTER TABLE articles ADD COLUMN IF NOT EXISTS riassunto_ai TEXT",
             "ALTER TABLE articles ADD COLUMN IF NOT EXISTS rilevanza VARCHAR(20)",
+            "ALTER TABLE articles ADD COLUMN IF NOT EXISTS tipo_atto VARCHAR(30)",
+            "ALTER TABLE articles ADD COLUMN IF NOT EXISTS tema VARCHAR(100)",
+            "CREATE INDEX IF NOT EXISTS idx_articles_tipoatto ON articles(tipo_atto, data_scansione DESC)",
         )
         try:
             with self.get_cursor() as cur:
@@ -272,13 +277,13 @@ class LegalRadarDB:
 
     def salva_articoli_storico(self, articoli_lista: List[Dict]) -> None:
         query = """
-            INSERT INTO articles (titolo, link, preview, macro, area, fonte, riassunto_ai, rilevanza) 
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s) 
+            INSERT INTO articles (titolo, link, preview, macro, area, fonte, riassunto_ai, rilevanza, tipo_atto, tema) 
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s) 
             ON CONFLICT (link) DO NOTHING
         """
         params = [
             (art['Titolo'], art['Link'], art['Preview'], art['Macro'], art['Area'], art['Fonte'],
-             art.get('RiassuntoAI'), art.get('Rilevanza'))
+             art.get('RiassuntoAI'), art.get('Rilevanza'), art.get('TipoAtto'), art.get('Tema'))
             for art in articoli_lista
         ]
         with self.get_cursor() as cur:
@@ -317,6 +322,50 @@ class LegalRadarDB:
             cur.execute(query, params)
             articoli = cur.fetchall()
         return [dict(a) for a in articoli]
+
+    def estrai_per_tipo_atto(self, tipo_atto: str, user_id: int, ricerca_testo: str = "",
+                             tema: Optional[str] = None) -> List[Dict]:
+        """Estrae articoli per categoria AI (sentenza/provvedimento/news), con filtro tema opzionale,
+        rispettando le fonti spente dall'utente e portando stato letto + tipo fonte."""
+        query = """
+            SELECT a.*, COALESCE(uas.letto, FALSE) AS letto, src.tipo_fonte
+            FROM articles a
+            LEFT JOIN user_article_status uas
+                ON uas.article_id = a.id AND uas.user_id = %s
+            LEFT JOIN sources src ON src.nome = a.fonte
+            WHERE a.tipo_atto = %s
+            AND a.fonte NOT IN (
+                SELECT s.nome FROM sources s
+                JOIN user_source_preferences usp ON s.id = usp.source_id
+                WHERE usp.user_id = %s AND usp.is_active = FALSE
+            )
+        """
+        params = [user_id, tipo_atto, user_id]
+        if tema:
+            query += " AND a.tema = %s"
+            params.append(tema)
+        if ricerca_testo:
+            query += " AND (a.titolo ILIKE %s OR a.preview ILIKE %s OR a.area ILIKE %s)"
+            text_param = f"%{ricerca_testo}%"
+            params.extend([text_param, text_param, text_param])
+        query += " ORDER BY a.data_scansione DESC LIMIT 100"
+        with self.get_cursor(dict_cursor=True) as cur:
+            cur.execute(query, params)
+            articoli = cur.fetchall()
+        return [dict(a) for a in articoli]
+
+    def lista_temi(self, tipo_atto: Optional[str] = None) -> List[str]:
+        """Elenco dei temi presenti in archivio (per popolare il filtro)."""
+        if tipo_atto:
+            query = "SELECT DISTINCT tema FROM articles WHERE tema IS NOT NULL AND tipo_atto = %s ORDER BY tema ASC"
+            args = (tipo_atto,)
+        else:
+            query = "SELECT DISTINCT tema FROM articles WHERE tema IS NOT NULL ORDER BY tema ASC"
+            args = ()
+        with self.get_cursor() as cur:
+            cur.execute(query, args)
+            righe = cur.fetchall()
+        return [r[0] for r in righe]
 
     def aggiungi_bookmark(self, user_id: int, article_id: int) -> None:
         try:
@@ -578,27 +627,34 @@ def genera_sintesi_groq(url: str, preview_text: str) -> str:
     except: return "⚠️ Connessione AI fallita."
 
 def genera_microriassunto_groq(titolo: str, preview: str) -> Dict[str, Optional[str]]:
-    """Genera un micro-riassunto (1-2 frasi) + tag rilevanza per un articolo,
-    chiamando Groq con output JSON. Usato alla ingestion.
-    Ritorna {'riassunto': str|None, 'rilevanza': 'alta'|'media'|None}.
-    Fail-safe: in caso di errore ritorna valori None (l'articolo entra comunque)."""
+    """Genera micro-riassunto + rilevanza + tipo_atto + tema, via Groq (JSON). Usato all'ingestion.
+    Ritorna {'riassunto','rilevanza','tipo_atto','tema'}. Fail-safe: None su errore."""
+    vuoto = {"riassunto": None, "rilevanza": None, "tipo_atto": None, "tema": None}
     raw_key = st.secrets.get("GROQ_API_KEY", "").strip()
     if not raw_key.startswith("gsk_"):
-        return {"riassunto": None, "rilevanza": None}
+        return vuoto
 
     testo = f"Titolo: {titolo}\n\nAnteprima: {preview}"
     api_url = "https://api.groq.com/openai/v1/chat/completions"
     headers = {"Authorization": f"Bearer {raw_key}", "Content-Type": "application/json"}
     system_prompt = (
-        "Sei un assistente legale che pre-analizza novità normative e giurisprudenziali per un team "
+        "Sei un assistente legale che pre-analizza novità normative, giurisprudenziali e di settore per un team "
         "di compliance specializzato nei comparatori online italiani (finanza, assicurazioni, utility). "
-        "Dato titolo e anteprima di un provvedimento o di una notizia, rispondi ESCLUSIVAMENTE con un "
-        "oggetto JSON valido, senza testo prima o dopo, con questa forma esatta:\n"
-        '{"riassunto": "<1-2 frasi in italiano, chiare e concrete, su cosa dice l\'atto>", '
-        '"rilevanza": "<alta|media>"}\n'
-        "Imposta \"alta\" se l'atto ha impatto diretto su comparatori/aggregatori "
-        "(es. sanzioni, telemarketing, consenso, trasparenza tariffaria, data breach, intermediazione); "
-        "\"media\" negli altri casi. Non aggiungere campi."
+        "Dato titolo e anteprima, rispondi ESCLUSIVAMENTE con un oggetto JSON valido, senza testo prima o dopo:\n"
+        '{"riassunto": "<1-2 frasi in italiano, chiare e concrete>", '
+        '"rilevanza": "<alta|media>", '
+        '"tipo_atto": "<sentenza|provvedimento|news>", '
+        '"tema": "<tema giuridico principale>"}\n\n'
+        "Regole:\n"
+        "- rilevanza: \"alta\" se impatta direttamente i comparatori (sanzioni, telemarketing, consenso, "
+        "trasparenza tariffaria, data breach, intermediazione); \"media\" altrimenti.\n"
+        "- tipo_atto: \"sentenza\" per pronunce giurisdizionali (Corti, tribunali, CGUE); "
+        "\"provvedimento\" per atti di autorità/regolatori (Garante, IVASS, Consob, delibere, linee guida, ordinanze); "
+        "\"news\" per articoli giornalistici/editoriali e comunicati divulgativi.\n"
+        "- tema: il tema giuridico principale. Usa preferibilmente uno tra: Privacy, Cybersecurity, "
+        "Assicurativo, Bancario e finanziario, Tributario, Consumatori e pratiche commerciali, Concorrenza, "
+        "Intelligenza artificiale. Se nessuno calza, indica tu il tema più appropriato in 1-3 parole.\n"
+        "Non aggiungere campi."
     )
     payload = {
         "model": "llama-3.3-70b-versatile",
@@ -613,17 +669,20 @@ def genera_microriassunto_groq(titolo: str, preview: str) -> Dict[str, Optional[
         r = requests.post(api_url, headers=headers, json=payload, timeout=15)
         if r.status_code != 200:
             logging.error("Microriassunto: errore AI %s", r.status_code)
-            return {"riassunto": None, "rilevanza": None}
-        contenuto = r.json()['choices'][0]['message']['content'].strip()
-        dati = json.loads(contenuto)
+            return vuoto
+        dati = json.loads(r.json()['choices'][0]['message']['content'].strip())
         riassunto = (dati.get("riassunto") or "").strip()[:600] or None
         rilevanza = (dati.get("rilevanza") or "").strip().lower()
         if rilevanza not in ("alta", "media"):
             rilevanza = None
-        return {"riassunto": riassunto, "rilevanza": rilevanza}
+        tipo_atto = (dati.get("tipo_atto") or "").strip().lower()
+        if tipo_atto not in ("sentenza", "provvedimento", "news"):
+            tipo_atto = None
+        tema = (dati.get("tema") or "").strip()[:100] or None
+        return {"riassunto": riassunto, "rilevanza": rilevanza, "tipo_atto": tipo_atto, "tema": tema}
     except Exception as e:
         logging.error("Microriassunto fallito: %s", e)
-        return {"riassunto": None, "rilevanza": None}
+        return vuoto
 
 def _ingest_rss(f: Dict) -> List[Dict]:
     """Strategia di ingestion per fonti con feed RSS."""
@@ -632,12 +691,13 @@ def _ingest_rss(f: Dict) -> List[Dict]:
     for entry in feed.entries[:5]:
         sommario = entry.summary if hasattr(entry, 'summary') else ""
         preview = BeautifulSoup(sommario, "html.parser").get_text()[:250] + "..."
-        # Pre-analisi AI: micro-riassunto + tag rilevanza (fail-safe se l'AI non risponde)
+        # Pre-analisi AI: riassunto + rilevanza + tipo_atto + tema (fail-safe se l'AI non risponde)
         meta = genera_microriassunto_groq(entry.title, preview)
         risultati.append({
             "Titolo": entry.title, "Link": entry.link, "Preview": preview,
             "Macro": f['macro'], "Area": f['area'], "Fonte": f['nome'],
-            "RiassuntoAI": meta["riassunto"], "Rilevanza": meta["rilevanza"]
+            "RiassuntoAI": meta["riassunto"], "Rilevanza": meta["rilevanza"],
+            "TipoAtto": meta["tipo_atto"], "Tema": meta["tema"]
         })
     return risultati
 
@@ -727,9 +787,9 @@ with st.sidebar:
 
     opzioni_nav = [
         "🏠 Dashboard",
-        "📖 Leggi & Normativa",
-        "🏛️ Provvedimenti & Sentenze",
-        "📰 News & Aggiornamenti",
+        "🏛️ Provvedimenti",
+        "⚖️ Sentenze",
+        "📰 News",
         "🔖 I Miei Salvati",
         "⚙️ Gestione Fonti"
     ]
@@ -764,6 +824,9 @@ def mostra_hub_legale(lista_articoli: List[Dict], tipo_bacheca: str):
             e_link = html.escape(str(art.get('link') or ''), quote=True)
             rango = art.get('tipo_fonte')
             tag_rango = f'<span class="meta-tag tag-rango">{html.escape(str(rango))}</span>' if rango else ''
+            # Tag tema (dall'AI): se assente, ripiega sull'area manuale
+            tema = art.get('tema') or art.get('area')
+            tag_tema = f'<span class="meta-tag tag-area">{html.escape(str(tema))}</span>' if tema else ''
             # Badge rilevanza (solo priorità visiva, non nasconde nulla)
             rilevanza = art.get('rilevanza')
             if rilevanza == "alta":
@@ -777,7 +840,7 @@ def mostra_hub_legale(lista_articoli: List[Dict], tipo_bacheca: str):
             blocco_riassunto = f'<div class="card-microsummary">✦ {html.escape(str(riassunto))}</div>' if riassunto else ''
             card_html = (
                 f'<div class="{classe_card}">'
-                f'<div><span class="meta-tag tag-area">{e_area}</span>'
+                f'<div>{tag_tema}'
                 f'<span class="meta-tag tag-fonte">{e_fonte}</span>{tag_rango}{badge_ril}</div>'
                 f'<a href="{e_link}" target="_blank" class="card-title">{e_titolo}{badge_nuovo}</a>'
                 f'{blocco_riassunto}'
@@ -896,17 +959,29 @@ if pagina_pulita == "🏠 Dashboard":
     else:
         st.info("Nessun alert urgente rilevato dalle tue fonti attive.")
 
-elif pagina_pulita in ["📖 Leggi & Normativa", "🏛️ Provvedimenti & Sentenze", "📰 News & Aggiornamenti"]:
-    macro_categoria = pagina_pulita.replace("📖 ", "").replace("🏛️ ", "").replace("📰 ", "")
+elif pagina_pulita in ["🏛️ Provvedimenti", "⚖️ Sentenze", "📰 News"]:
+    # Mappa la voce di menu alla categoria AI
+    mappa_tipo = {"🏛️ Provvedimenti": "provvedimento", "⚖️ Sentenze": "sentenza", "📰 News": "news"}
+    tipo_atto = mappa_tipo[pagina_pulita]
+    etichetta = pagina_pulita.split(" ", 1)[1]
+
     col_h, col_btn = st.columns([3, 1])
-    col_h.header(macro_categoria)
+    col_h.header(etichetta)
     with col_btn:
         st.write("")
-        if st.button("✓ Segna tutto come letto", key=f"readall_{macro_categoria}", use_container_width=True):
-            db.segna_tutti_letti(st.session_state.user['id'], filtro_macro=macro_categoria)
+        if st.button("✓ Segna tutto come letto", key=f"readall_{tipo_atto}", use_container_width=True):
+            db.segna_tutti_letti(st.session_state.user['id'])
             st.rerun()
-    # MODIFICA: Passiamo l'ID utente per nascondere gli articoli delle fonti spente
-    dati_db = db.estrai_archivio(filtro_macro=macro_categoria, user_id=st.session_state.user['id'], ricerca_testo=ricerca)
+
+    # Filtro per tema (popolato dai temi realmente presenti in questa categoria)
+    temi_disponibili = db.lista_temi(tipo_atto)
+    tema_sel = None
+    if temi_disponibili:
+        scelta_tema = st.selectbox("Filtra per tema", ["Tutti i temi"] + temi_disponibili, key=f"tema_{tipo_atto}")
+        if scelta_tema != "Tutti i temi":
+            tema_sel = scelta_tema
+
+    dati_db = db.estrai_per_tipo_atto(tipo_atto, st.session_state.user['id'], ricerca_testo=ricerca, tema=tema_sel)
     mostra_hub_legale(dati_db, tipo_bacheca="radar")
 
 elif pagina_pulita == "🔖 I Miei Salvati":
