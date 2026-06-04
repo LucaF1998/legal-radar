@@ -291,6 +291,9 @@ class LegalRadarDB:
                 "UPDATE articles SET riassunto_ai = %s, rilevanza = %s WHERE id = %s",
                 (riassunto[:600] if riassunto else None, rilevanza, article_id)
             )
+
+    # --- MODIFICA: ESTRAZIONE ARCHIVIO FILTRATO SULLE PREFERENZE UTENTE + STATO LETTO ---
+    def estrai_archivio(self, filtro_macro: str, user_id: int, ricerca_testo: str = "") -> List[Dict]:
         query = """
             SELECT a.*, COALESCE(uas.letto, FALSE) AS letto, src.tipo_fonte
             FROM articles a
