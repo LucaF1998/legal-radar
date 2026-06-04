@@ -135,6 +135,49 @@ class LegalRadarDB:
             return dict(user)
         return None
 
+    # --- AGGIUNTA: GESTIONE RUOLI (admin / user) ---
+    def conta_admin(self) -> int:
+        """Quanti admin esistono. Serve per il bootstrap del primo admin."""
+        with self.get_cursor() as cur:
+            cur.execute("SELECT COUNT(*) FROM users WHERE role = 'admin'")
+            n = cur.fetchone()[0]
+        return n
+
+    def bootstrap_primo_admin(self) -> Optional[str]:
+        """Se non esiste alcun admin, promuove il primo utente registrato (id minimo).
+        Ritorna lo username promosso, oppure None se non c'era nulla da fare."""
+        if self.conta_admin() > 0:
+            return None
+        with self.get_cursor() as cur:
+            cur.execute("SELECT id, username FROM users ORDER BY id ASC LIMIT 1")
+            primo = cur.fetchone()
+            if not primo:
+                return None
+            cur.execute("UPDATE users SET role = 'admin' WHERE id = %s", (primo[0],))
+        logging.info("Bootstrap: '%s' promosso ad admin (nessun admin presente).", primo[1])
+        return primo[1]
+
+    def lista_utenti(self) -> List[Dict]:
+        with self.get_cursor(dict_cursor=True) as cur:
+            cur.execute("SELECT id, username, role FROM users ORDER BY id ASC")
+            utenti = cur.fetchall()
+        return [dict(u) for u in utenti]
+
+    def imposta_ruolo(self, target_user_id: int, nuovo_ruolo: str) -> bool:
+        """Imposta il ruolo di un utente. Impedisce di rimuovere l'ultimo admin."""
+        if nuovo_ruolo not in ("admin", "user"):
+            return False
+        # Salvaguardia: non lasciare il sistema senza admin
+        if nuovo_ruolo == "user":
+            with self.get_cursor() as cur:
+                cur.execute("SELECT role FROM users WHERE id = %s", (target_user_id,))
+                row = cur.fetchone()
+            if row and row[0] == "admin" and self.conta_admin() <= 1:
+                return False  # è l'ultimo admin: non si declassa
+        with self.get_cursor() as cur:
+            cur.execute("UPDATE users SET role = %s WHERE id = %s", (nuovo_ruolo, target_user_id))
+        return True
+
     def carica_fonti(self) -> List[Dict]:
         with self.get_cursor(dict_cursor=True) as cur:
             cur.execute("SELECT * FROM sources ORDER BY nome ASC")
@@ -501,6 +544,10 @@ if st.session_state.user is None:
             elif scelta == "Accedi":
                 user = db.verifica_utente(username, password)
                 if user:
+                    # Bootstrap: se non esiste alcun admin, il primo utente viene promosso
+                    db.bootstrap_primo_admin()
+                    # Ricarico l'utente per avere il ruolo aggiornato in sessione
+                    user = db.verifica_utente(username, password)
                     st.session_state.user = user
                     st.success(f"Accesso eseguito. Benvenuto {user['username']}!")
                     st.rerun()
@@ -511,7 +558,9 @@ if st.session_state.user is None:
 # --- 6. INTERFACCIA UTENTE AUTENTICATO ---
 with st.sidebar:
     st.title("⚖️ Legal Radar")
-    st.write(f"👤 Utente: **{st.session_state.user['username']}**")
+    ruolo_corrente = st.session_state.user.get('role', 'user')
+    badge_ruolo = "👑 Admin" if ruolo_corrente == "admin" else "👤 Utente"
+    st.write(f"{badge_ruolo}: **{st.session_state.user['username']}**")
 
     # Conteggi non-letti per badge nella navigazione
     non_letti = db.conta_non_letti(st.session_state.user['id'])
@@ -709,13 +758,48 @@ elif pagina_pulita == "⚙️ Gestione Fonti":
                 
     st.divider()
     
-    # SEZIONE 3 - ELIMINAZIONE GLOBALE
-    st.subheader("🗑️ Database Globale Fonti (Eliminazione per tutti)")
+    # SEZIONE 3 - ELIMINAZIONE GLOBALE (riservata agli admin)
+    is_admin = st.session_state.user.get('role', 'user') == 'admin'
+    st.subheader("🗑️ Database Globale Fonti")
+    if is_admin:
+        st.caption("Come admin puoi eliminare le fonti dal catalogo comune. L'azione vale per tutti gli utenti.")
+    else:
+        st.caption("Elenco delle fonti del catalogo comune. L'eliminazione è riservata agli amministratori.")
     for f in fonti_personali:
         col_t, col_b = st.columns([5, 1])
         col_t.markdown(f"**{f['nome']}** - <span style='font-size:12px;color:#888;'>{f['url']}</span>", unsafe_allow_html=True)
-        if col_b.button("Elimina", key=f"del_src_{f['id']}"):
-            db.rimuovi_fonte(f['id'])
-            st.success("Fonte rimossa dal sistema.")
-            st.rerun()
+        if is_admin:
+            if col_b.button("Elimina", key=f"del_src_{f['id']}"):
+                db.rimuovi_fonte(f['id'])
+                st.success("Fonte rimossa dal sistema.")
+                st.rerun()
+        else:
+            col_b.caption("🔒")
         st.write("---")
+
+    # SEZIONE 4 - GESTIONE UTENTI (solo admin)
+    if is_admin:
+        st.divider()
+        st.subheader("👥 Gestione Utenti (Admin)")
+        st.caption("Promuovi un utente ad admin o riportalo a utente standard. Non è possibile declassare l'ultimo admin rimasto.")
+        utenti = db.lista_utenti()
+        for u in utenti:
+            col_u, col_r, col_act = st.columns([3, 1, 2])
+            icona = "👑" if u['role'] == 'admin' else "👤"
+            col_u.markdown(f"{icona} **{u['username']}**")
+            col_r.caption(u['role'])
+            with col_act:
+                if u['role'] == 'user':
+                    if st.button("Promuovi ad admin", key=f"promote_{u['id']}"):
+                        db.imposta_ruolo(u['id'], 'admin')
+                        st.rerun()
+                else:
+                    # Non mostro il declassamento per se stessi per evitare auto-lock confusi
+                    if u['id'] != st.session_state.user['id']:
+                        if st.button("Declassa a utente", key=f"demote_{u['id']}"):
+                            if db.imposta_ruolo(u['id'], 'user'):
+                                st.rerun()
+                            else:
+                                st.warning("Impossibile: deve restare almeno un admin.")
+                    else:
+                        col_act.caption("(tu)")
