@@ -81,10 +81,24 @@ def esegui_scansione_notturna() -> None:
             tipo = f['tipo_ingestion'] if 'tipo_ingestion' in f.keys() and f['tipo_ingestion'] else 'rss'
             strategia = STRATEGIE_INGESTION.get(tipo, _ingest_rss)
             try:
-                articoli_scovati.extend(strategia(dict(f)))
+                trovati = strategia(dict(f))
+                articoli_scovati.extend(trovati)
+                esito = "ok" if trovati else "vuoto"
+                messaggio = f"{len(trovati)} elementi rilevati" if trovati else "Nessun elemento dal feed"
+                cur.execute(
+                    "UPDATE sources SET ultima_sync = CURRENT_TIMESTAMP, ultimo_esito = %s, ultimo_messaggio = %s WHERE id = %s",
+                    (esito, messaggio[:500], f['id'])
+                )
             except Exception as e:
                 logging.error("Ingestion fallita per %s (%s): %s", f['nome'], tipo, str(e))
+                cur.execute(
+                    "UPDATE sources SET ultima_sync = CURRENT_TIMESTAMP, ultimo_esito = %s, ultimo_messaggio = %s WHERE id = %s",
+                    ("errore", str(e)[:500], f['id'])
+                )
                 continue
+
+        # Salva l'esito salute anche se non ci sono nuovi articoli
+        conn.commit()
 
         if articoli_scovati:
             query_insert = """
