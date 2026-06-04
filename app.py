@@ -766,19 +766,16 @@ def mostra_hub_legale(lista_articoli: List[Dict], tipo_bacheca: str):
             # Micro-riassunto AI sotto il titolo (se presente)
             riassunto = art.get('riassunto_ai')
             blocco_riassunto = f'<div class="card-microsummary">✦ {html.escape(str(riassunto))}</div>' if riassunto else ''
-            st.markdown(f"""
-            <div class="{classe_card}">
-                <div>
-                    <span class="meta-tag tag-area">{e_area}</span>
-                    <span class="meta-tag tag-fonte">{e_fonte}</span>
-                    {tag_rango}
-                    {badge_ril}
-                </div>
-                <a href="{e_link}" target="_blank" class="card-title">{e_titolo}{badge_nuovo}</a>
-                {blocco_riassunto}
-                <div class="card-preview">{e_preview}</div>
-            </div>
-            """, unsafe_allow_html=True)
+            card_html = (
+                f'<div class="{classe_card}">'
+                f'<div><span class="meta-tag tag-area">{e_area}</span>'
+                f'<span class="meta-tag tag-fonte">{e_fonte}</span>{tag_rango}{badge_ril}</div>'
+                f'<a href="{e_link}" target="_blank" class="card-title">{e_titolo}{badge_nuovo}</a>'
+                f'{blocco_riassunto}'
+                f'<div class="card-preview">{e_preview}</div>'
+                f'</div>'
+            )
+            st.markdown(card_html, unsafe_allow_html=True)
             
             c1, c2, c3 = st.columns([1, 1, 2])
             with c1:
@@ -844,20 +841,16 @@ if pagina_pulita not in ["⚙️ Gestione Fonti", "🏠 Dashboard"]:
 # --- ROUTING PAGINE ---
 if pagina_pulita == "🏠 Dashboard":
     oggi = datetime.now().strftime('%d/%m/%Y')
-    st.markdown(f"""
-    <div style="border-bottom:3px solid var(--brand); padding-bottom:14px; margin-bottom:6px;
-                display:flex; align-items:flex-end; justify-content:space-between;">
-        <div style="font-family:'Fraunces',serif; font-weight:600; font-size:34px; letter-spacing:-0.5px; color:var(--ink);">
-            Legal Radar<span style="color:var(--brand);">.</span>
-        </div>
-        <div style="font-size:12px; text-transform:uppercase; letter-spacing:2px; color:var(--brand); font-weight:700;">
-            Regulatory Intelligence
-        </div>
-    </div>
-    <div style="font-size:13px; color:var(--ink-soft); font-style:italic; margin-bottom:24px;">
-        Rassegna per {st.session_state.user['username']} · {oggi}
-    </div>
-    """, unsafe_allow_html=True)
+    e_user = html.escape(str(st.session_state.user['username']))
+    masthead_html = (
+        '<div style="border-bottom:3px solid var(--brand); padding-bottom:14px; margin-bottom:6px; display:flex; align-items:flex-end; justify-content:space-between;">'
+        '<div style="font-family:\'Fraunces\',serif; font-weight:600; font-size:34px; letter-spacing:-0.5px; color:var(--ink);">'
+        'Legal Radar<span style="color:var(--brand);">.</span></div>'
+        '<div style="font-size:12px; text-transform:uppercase; letter-spacing:2px; color:var(--brand); font-weight:700;">Regulatory Intelligence</div>'
+        '</div>'
+        f'<div style="font-size:13px; color:var(--ink-soft); font-style:italic; margin-bottom:24px;">Rassegna per {e_user} · {oggi}</div>'
+    )
+    st.markdown(masthead_html, unsafe_allow_html=True)
     
     metriche = db.estrai_metriche_dashboard(st.session_state.user['id'])
     c1, c2, c3 = st.columns(3)
@@ -876,13 +869,14 @@ if pagina_pulita == "🏠 Dashboard":
             a_area = html.escape(str(al.get('area') or ''))
             a_titolo = html.escape(str(al.get('titolo') or ''))
             a_link = html.escape(str(al.get('link') or ''), quote=True)
-            st.markdown(f"""
-            <div style="background: white; border-radius: 8px; padding: 15px; border: 1px solid #eaeaea; border-left: 4px solid #d32f2f; margin-bottom: 10px;">
-                <span style="font-size: 11px; font-weight: bold; color: #d32f2f; text-transform: uppercase;">⚠️ ALERT</span> | 
-                <span style="font-size: 12px; color: #666;">{a_fonte} ({a_area})</span><br>
-                <a href="{a_link}" target="_blank" style="font-weight: 600; color: #1a1a1a; text-decoration: none; font-size: 15px;">{a_titolo}</a>
-            </div>
-            """, unsafe_allow_html=True)
+            alert_html = (
+                '<div style="background: white; border-radius: 8px; padding: 15px; border: 1px solid #eaeaea; border-left: 4px solid #d32f2f; margin-bottom: 10px;">'
+                '<span style="font-size: 11px; font-weight: bold; color: #d32f2f; text-transform: uppercase;">⚠️ ALERT</span> | '
+                f'<span style="font-size: 12px; color: #666;">{a_fonte} ({a_area})</span><br>'
+                f'<a href="{a_link}" target="_blank" style="font-weight: 600; color: #1a1a1a; text-decoration: none; font-size: 15px;">{a_titolo}</a>'
+                '</div>'
+            )
+            st.markdown(alert_html, unsafe_allow_html=True)
     else:
         st.info("Nessun alert urgente rilevato dalle tue fonti attive.")
 
