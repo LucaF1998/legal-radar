@@ -19,20 +19,27 @@ logging.basicConfig(
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "").strip()
 
 
-def genera_microriassunto(titolo: str, preview: str) -> Tuple[Optional[str], Optional[str]]:
-    """Micro-riassunto + rilevanza via Groq (JSON). Fail-safe: (None, None) su errore."""
+def genera_microriassunto(titolo: str, preview: str) -> Tuple[Optional[str], Optional[str], Optional[str], Optional[str]]:
+    """Riassunto + rilevanza + tipo_atto + tema via Groq (JSON). Fail-safe: tutti None su errore."""
     if not GROQ_API_KEY.startswith("gsk_"):
-        return None, None
+        return None, None, None, None
     api_url = "https://api.groq.com/openai/v1/chat/completions"
     headers = {"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"}
     system_prompt = (
-        "Sei un assistente legale che pre-analizza novità normative e giurisprudenziali per un team "
+        "Sei un assistente legale che pre-analizza novità normative, giurisprudenziali e di settore per un team "
         "di compliance specializzato nei comparatori online italiani (finanza, assicurazioni, utility). "
         "Dato titolo e anteprima, rispondi ESCLUSIVAMENTE con un oggetto JSON valido, senza testo prima o dopo:\n"
-        '{"riassunto": "<1-2 frasi in italiano, chiare e concrete>", "rilevanza": "<alta|media>"}\n'
-        "Imposta \"alta\" se l'atto ha impatto diretto su comparatori/aggregatori "
-        "(sanzioni, telemarketing, consenso, trasparenza tariffaria, data breach, intermediazione); "
-        "\"media\" negli altri casi."
+        '{"riassunto": "<1-2 frasi in italiano>", "rilevanza": "<alta|media>", '
+        '"tipo_atto": "<sentenza|provvedimento|news>", "tema": "<tema giuridico principale>"}\n\n'
+        "Regole:\n"
+        "- rilevanza: \"alta\" se impatta direttamente i comparatori (sanzioni, telemarketing, consenso, "
+        "trasparenza tariffaria, data breach, intermediazione); \"media\" altrimenti.\n"
+        "- tipo_atto: \"sentenza\" per pronunce giurisdizionali (Corti, tribunali, CGUE); "
+        "\"provvedimento\" per atti di autorità/regolatori (Garante, IVASS, Consob, delibere, linee guida, ordinanze); "
+        "\"news\" per articoli giornalistici/editoriali e comunicati divulgativi.\n"
+        "- tema: tema giuridico principale. Preferisci uno tra: Privacy, Cybersecurity, Assicurativo, "
+        "Bancario e finanziario, Tributario, Consumatori e pratiche commerciali, Concorrenza, Intelligenza artificiale. "
+        "Se nessuno calza, indica tu il tema più appropriato in 1-3 parole."
     )
     payload = {
         "model": "llama-3.3-70b-versatile",
@@ -47,16 +54,20 @@ def genera_microriassunto(titolo: str, preview: str) -> Tuple[Optional[str], Opt
         r = requests.post(api_url, headers=headers, json=payload, timeout=15)
         if r.status_code != 200:
             logging.error("Microriassunto: errore AI %s per '%s'", r.status_code, titolo[:50])
-            return None, None
+            return None, None, None, None
         dati = json.loads(r.json()['choices'][0]['message']['content'].strip())
         riassunto = (dati.get("riassunto") or "").strip()[:600] or None
         rilevanza = (dati.get("rilevanza") or "").strip().lower()
         if rilevanza not in ("alta", "media"):
             rilevanza = None
-        return riassunto, rilevanza
+        tipo_atto = (dati.get("tipo_atto") or "").strip().lower()
+        if tipo_atto not in ("sentenza", "provvedimento", "news"):
+            tipo_atto = None
+        tema = (dati.get("tema") or "").strip()[:100] or None
+        return riassunto, rilevanza, tipo_atto, tema
     except Exception as e:
         logging.error("Microriassunto fallito per '%s': %s", titolo[:50], e)
-        return None, None
+        return None, None, None, None
 
 
 # ----------------------------------------------------------------------
@@ -69,7 +80,7 @@ def _ingest_rss(f: Dict) -> List[Tuple]:
     for entry in feed.entries[:10]:
         sommario = entry.summary if hasattr(entry, 'summary') else ""
         preview = BeautifulSoup(sommario, "html.parser").get_text()[:250] + "..."
-        riassunto, rilevanza = genera_microriassunto(entry.title, preview)
+        riassunto, rilevanza, tipo_atto, tema = genera_microriassunto(entry.title, preview)
         risultati.append((
             entry.title,
             entry.link,
@@ -79,6 +90,8 @@ def _ingest_rss(f: Dict) -> List[Tuple]:
             f['nome'],
             riassunto,
             rilevanza,
+            tipo_atto,
+            tema,
         ))
     return risultati
 
@@ -148,8 +161,8 @@ def esegui_scansione_notturna() -> None:
 
         if articoli_scovati:
             query_insert = """
-                INSERT INTO articles (titolo, link, preview, macro, area, fonte, riassunto_ai, rilevanza)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                INSERT INTO articles (titolo, link, preview, macro, area, fonte, riassunto_ai, rilevanza, tipo_atto, tema)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT (link) DO NOTHING
             """
             cur.executemany(query_insert, articoli_scovati)
@@ -171,5 +184,3 @@ def esegui_scansione_notturna() -> None:
 
 if __name__ == "__main__":
     esegui_scansione_notturna()
-
-
