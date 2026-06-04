@@ -5,6 +5,7 @@ import time
 import requests
 import os
 import re
+import json
 import logging
 from contextlib import contextmanager
 from bs4 import BeautifulSoup
@@ -71,7 +72,9 @@ class LegalRadarDB:
                 macro VARCHAR(150),
                 area VARCHAR(150),
                 fonte VARCHAR(150),
-                data_scansione TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                data_scansione TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                riassunto_ai TEXT,
+                rilevanza VARCHAR(20)
             )
             """,
             """
@@ -112,6 +115,8 @@ class LegalRadarDB:
             "ALTER TABLE sources ADD COLUMN IF NOT EXISTS ultima_sync TIMESTAMP",
             "ALTER TABLE sources ADD COLUMN IF NOT EXISTS ultimo_esito VARCHAR(20)",
             "ALTER TABLE sources ADD COLUMN IF NOT EXISTS ultimo_messaggio TEXT",
+            "ALTER TABLE articles ADD COLUMN IF NOT EXISTS riassunto_ai TEXT",
+            "ALTER TABLE articles ADD COLUMN IF NOT EXISTS rilevanza VARCHAR(20)",
         )
         try:
             with self.get_cursor() as cur:
@@ -266,12 +271,13 @@ class LegalRadarDB:
 
     def salva_articoli_storico(self, articoli_lista: List[Dict]) -> None:
         query = """
-            INSERT INTO articles (titolo, link, preview, macro, area, fonte) 
-            VALUES (%s, %s, %s, %s, %s, %s) 
+            INSERT INTO articles (titolo, link, preview, macro, area, fonte, riassunto_ai, rilevanza) 
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s) 
             ON CONFLICT (link) DO NOTHING
         """
         params = [
-            (art['Titolo'], art['Link'], art['Preview'], art['Macro'], art['Area'], art['Fonte'])
+            (art['Titolo'], art['Link'], art['Preview'], art['Macro'], art['Area'], art['Fonte'],
+             art.get('RiassuntoAI'), art.get('Rilevanza'))
             for art in articoli_lista
         ]
         with self.get_cursor() as cur:
@@ -507,6 +513,10 @@ st.markdown("""
     .tag-area { background: var(--brand-soft); color: var(--brand-deep); }
     .tag-fonte { background: var(--gold-soft); color: var(--gold-ink); }
     .tag-rango { background: transparent; color: var(--ink-faint); border: 1px solid var(--line); }
+    .card-microsummary { font-family:'Inter',sans-serif; font-size:13.5px; color:var(--brand-deep); background:var(--brand-tint); border-left:2px solid var(--brand); padding:8px 12px; border-radius:0 5px 5px 0; margin:0 0 12px; line-height:1.5; }
+    .badge-ril { font-size:10px; font-weight:700; letter-spacing:.4px; padding:3px 9px; border-radius:4px; text-transform:uppercase; margin-bottom:12px; display:inline-block; }
+    .badge-ril-alta { background:var(--danger-soft); color:var(--danger); }
+    .badge-ril-media { background:var(--gold-soft); color:var(--gold-ink); }
 </style>
 """, unsafe_allow_html=True)
 
@@ -557,6 +567,54 @@ def genera_sintesi_groq(url: str, preview_text: str) -> str:
         return f"⚠️ Errore AI ({r.status_code})"
     except: return "⚠️ Connessione AI fallita."
 
+def genera_microriassunto_groq(titolo: str, preview: str) -> Dict[str, Optional[str]]:
+    """Genera un micro-riassunto (1-2 frasi) + tag rilevanza per un articolo,
+    chiamando Groq con output JSON. Usato alla ingestion.
+    Ritorna {'riassunto': str|None, 'rilevanza': 'alta'|'media'|None}.
+    Fail-safe: in caso di errore ritorna valori None (l'articolo entra comunque)."""
+    raw_key = st.secrets.get("GROQ_API_KEY", "").strip()
+    if not raw_key.startswith("gsk_"):
+        return {"riassunto": None, "rilevanza": None}
+
+    testo = f"Titolo: {titolo}\n\nAnteprima: {preview}"
+    api_url = "https://api.groq.com/openai/v1/chat/completions"
+    headers = {"Authorization": f"Bearer {raw_key}", "Content-Type": "application/json"}
+    system_prompt = (
+        "Sei un assistente legale che pre-analizza novità normative e giurisprudenziali per un team "
+        "di compliance specializzato nei comparatori online italiani (finanza, assicurazioni, utility). "
+        "Dato titolo e anteprima di un provvedimento o di una notizia, rispondi ESCLUSIVAMENTE con un "
+        "oggetto JSON valido, senza testo prima o dopo, con questa forma esatta:\n"
+        '{"riassunto": "<1-2 frasi in italiano, chiare e concrete, su cosa dice l\'atto>", '
+        '"rilevanza": "<alta|media>"}\n'
+        "Imposta \"alta\" se l'atto ha impatto diretto su comparatori/aggregatori "
+        "(es. sanzioni, telemarketing, consenso, trasparenza tariffaria, data breach, intermediazione); "
+        "\"media\" negli altri casi. Non aggiungere campi."
+    )
+    payload = {
+        "model": "llama-3.3-70b-versatile",
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": testo}
+        ],
+        "temperature": 0.1,
+        "response_format": {"type": "json_object"}
+    }
+    try:
+        r = requests.post(api_url, headers=headers, json=payload, timeout=15)
+        if r.status_code != 200:
+            logging.error("Microriassunto: errore AI %s", r.status_code)
+            return {"riassunto": None, "rilevanza": None}
+        contenuto = r.json()['choices'][0]['message']['content'].strip()
+        dati = json.loads(contenuto)
+        riassunto = (dati.get("riassunto") or "").strip()[:600] or None
+        rilevanza = (dati.get("rilevanza") or "").strip().lower()
+        if rilevanza not in ("alta", "media"):
+            rilevanza = None
+        return {"riassunto": riassunto, "rilevanza": rilevanza}
+    except Exception as e:
+        logging.error("Microriassunto fallito: %s", e)
+        return {"riassunto": None, "rilevanza": None}
+
 def _ingest_rss(f: Dict) -> List[Dict]:
     """Strategia di ingestion per fonti con feed RSS."""
     risultati = []
@@ -564,9 +622,12 @@ def _ingest_rss(f: Dict) -> List[Dict]:
     for entry in feed.entries[:5]:
         sommario = entry.summary if hasattr(entry, 'summary') else ""
         preview = BeautifulSoup(sommario, "html.parser").get_text()[:250] + "..."
+        # Pre-analisi AI: micro-riassunto + tag rilevanza (fail-safe se l'AI non risponde)
+        meta = genera_microriassunto_groq(entry.title, preview)
         risultati.append({
             "Titolo": entry.title, "Link": entry.link, "Preview": preview,
-            "Macro": f['macro'], "Area": f['area'], "Fonte": f['nome']
+            "Macro": f['macro'], "Area": f['area'], "Fonte": f['nome'],
+            "RiassuntoAI": meta["riassunto"], "Rilevanza": meta["rilevanza"]
         })
     return risultati
 
@@ -687,14 +748,27 @@ def mostra_hub_legale(lista_articoli: List[Dict], tipo_bacheca: str):
             badge_nuovo = "" if e_letto else '<span class="badge-nuovo">Nuovo</span>'
             rango = art.get('tipo_fonte')
             tag_rango = f'<span class="meta-tag tag-rango">{rango}</span>' if rango else ''
+            # Badge rilevanza (solo priorità visiva, non nasconde nulla)
+            rilevanza = art.get('rilevanza')
+            if rilevanza == "alta":
+                badge_ril = '<span class="badge-ril badge-ril-alta">● Rilevanza alta</span>'
+            elif rilevanza == "media":
+                badge_ril = '<span class="badge-ril badge-ril-media">● Rilevanza media</span>'
+            else:
+                badge_ril = ''
+            # Micro-riassunto AI sotto il titolo (se presente)
+            riassunto = art.get('riassunto_ai')
+            blocco_riassunto = f'<div class="card-microsummary">✦ {riassunto}</div>' if riassunto else ''
             st.markdown(f"""
             <div class="{classe_card}">
                 <div>
                     <span class="meta-tag tag-area">{art['area']}</span>
                     <span class="meta-tag tag-fonte">{art['fonte']}</span>
                     {tag_rango}
+                    {badge_ril}
                 </div>
                 <a href="{art['link']}" target="_blank" class="card-title">{art['titolo']}{badge_nuovo}</a>
+                {blocco_riassunto}
                 <div class="card-preview">{art['preview']}</div>
             </div>
             """, unsafe_allow_html=True)
