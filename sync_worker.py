@@ -1,5 +1,6 @@
 import os
 import sys
+import json
 import logging
 from typing import List, Tuple, Dict, Optional
 
@@ -15,6 +16,48 @@ logging.basicConfig(
     handlers=[logging.StreamHandler(sys.stdout)]
 )
 
+GROQ_API_KEY = os.getenv("GROQ_API_KEY", "").strip()
+
+
+def genera_microriassunto(titolo: str, preview: str) -> Tuple[Optional[str], Optional[str]]:
+    """Micro-riassunto + rilevanza via Groq (JSON). Fail-safe: (None, None) su errore."""
+    if not GROQ_API_KEY.startswith("gsk_"):
+        return None, None
+    api_url = "https://api.groq.com/openai/v1/chat/completions"
+    headers = {"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"}
+    system_prompt = (
+        "Sei un assistente legale che pre-analizza novità normative e giurisprudenziali per un team "
+        "di compliance specializzato nei comparatori online italiani (finanza, assicurazioni, utility). "
+        "Dato titolo e anteprima, rispondi ESCLUSIVAMENTE con un oggetto JSON valido, senza testo prima o dopo:\n"
+        '{"riassunto": "<1-2 frasi in italiano, chiare e concrete>", "rilevanza": "<alta|media>"}\n'
+        "Imposta \"alta\" se l'atto ha impatto diretto su comparatori/aggregatori "
+        "(sanzioni, telemarketing, consenso, trasparenza tariffaria, data breach, intermediazione); "
+        "\"media\" negli altri casi."
+    )
+    payload = {
+        "model": "llama-3.3-70b-versatile",
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": f"Titolo: {titolo}\n\nAnteprima: {preview}"}
+        ],
+        "temperature": 0.1,
+        "response_format": {"type": "json_object"}
+    }
+    try:
+        r = requests.post(api_url, headers=headers, json=payload, timeout=15)
+        if r.status_code != 200:
+            logging.error("Microriassunto: errore AI %s per '%s'", r.status_code, titolo[:50])
+            return None, None
+        dati = json.loads(r.json()['choices'][0]['message']['content'].strip())
+        riassunto = (dati.get("riassunto") or "").strip()[:600] or None
+        rilevanza = (dati.get("rilevanza") or "").strip().lower()
+        if rilevanza not in ("alta", "media"):
+            rilevanza = None
+        return riassunto, rilevanza
+    except Exception as e:
+        logging.error("Microriassunto fallito per '%s': %s", titolo[:50], e)
+        return None, None
+
 
 # ----------------------------------------------------------------------
 # STRATEGIE DI INGESTION (coerenti con app.py)
@@ -26,6 +69,7 @@ def _ingest_rss(f: Dict) -> List[Tuple]:
     for entry in feed.entries[:10]:
         sommario = entry.summary if hasattr(entry, 'summary') else ""
         preview = BeautifulSoup(sommario, "html.parser").get_text()[:250] + "..."
+        riassunto, rilevanza = genera_microriassunto(entry.title, preview)
         risultati.append((
             entry.title,
             entry.link,
@@ -33,6 +77,8 @@ def _ingest_rss(f: Dict) -> List[Tuple]:
             f['macro'],
             f['area'],
             f['nome'],
+            riassunto,
+            rilevanza,
         ))
     return risultati
 
@@ -102,8 +148,8 @@ def esegui_scansione_notturna() -> None:
 
         if articoli_scovati:
             query_insert = """
-                INSERT INTO articles (titolo, link, preview, macro, area, fonte)
-                VALUES (%s, %s, %s, %s, %s, %s)
+                INSERT INTO articles (titolo, link, preview, macro, area, fonte, riassunto_ai, rilevanza)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT (link) DO NOTHING
             """
             cur.executemany(query_insert, articoli_scovati)
@@ -125,3 +171,5 @@ def esegui_scansione_notturna() -> None:
 
 if __name__ == "__main__":
     esegui_scansione_notturna()
+
+
