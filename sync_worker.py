@@ -1,76 +1,113 @@
 import os
 import sys
+import logging
+from typing import List, Tuple, Dict, Optional
+
 import psycopg2
 import psycopg2.extras
 import feedparser
 import requests
 from bs4 import BeautifulSoup
 
-def esegui_scansione_notturna():
-    # 1. Recupera la stringa di connessione dalle variabili d'ambiente di GitHub
-    db_url = os.getenv("DB_URL")
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    handlers=[logging.StreamHandler(sys.stdout)]
+)
+
+
+# ----------------------------------------------------------------------
+# STRATEGIE DI INGESTION (coerenti con app.py)
+# ----------------------------------------------------------------------
+def _ingest_rss(f: Dict) -> List[Tuple]:
+    """Ingestion per fonti con feed RSS. Ritorna tuple pronte per executemany."""
+    risultati: List[Tuple] = []
+    feed = feedparser.parse(f['url'])
+    for entry in feed.entries[:10]:
+        sommario = entry.summary if hasattr(entry, 'summary') else ""
+        preview = BeautifulSoup(sommario, "html.parser").get_text()[:250] + "..."
+        risultati.append((
+            entry.title,
+            entry.link,
+            preview,
+            f['macro'],
+            f['area'],
+            f['nome'],
+        ))
+    return risultati
+
+
+def _ingest_scraper(f: Dict) -> List[Tuple]:
+    """Ingestion per fonti senza RSS (parser HTML dedicato per fonte).
+
+    Punto di aggancio per fonti istituzionali che non espongono RSS.
+    Ogni fonte 'scraper' richiede un parser specifico: finché non è
+    implementato, non produce articoli (fail-safe, niente crash).
+    """
+    logging.info("Fonte '%s' di tipo scraper: parser dedicato non ancora implementato.", f['nome'])
+    return []
+
+
+STRATEGIE_INGESTION = {
+    "rss": _ingest_rss,
+    "scraper": _ingest_scraper,
+}
+
+
+def esegui_scansione_notturna() -> None:
+    db_url: Optional[str] = os.getenv("DB_URL")
     if not db_url:
-        print("❌ Errore: Variabile DB_URL non configurata nei Secrets di GitHub.")
+        logging.error("Variabile DB_URL mancante nei Secrets.")
         sys.exit(1)
 
-    print("📡 Connessione al database cloud Neon.tech...")
+    logging.info("Connessione con PostgreSQL...")
+    conn = None
     try:
         conn = psycopg2.connect(db_url)
-        # Carica le fonti attuali registrate nel DB
         cur = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
+
         cur.execute("SELECT * FROM sources")
-        fonti = cur.fetchall()
-        
+        fonti: List[Dict] = cur.fetchall()
+
         if not fonti:
-            print("📭 Nessuna fonte registrata nel database. Fine processo.")
+            logging.warning("Nessuna fonte registrata.")
             cur.close()
             conn.close()
             return
 
-        print(f"📚 Trovate {len(fonti)} fonti da scansionare nel Radar.")
-        articoli_scovati = []
-
-        # 2. Avvia lo scraping dei feed RSS
+        articoli_scovati: List[Tuple] = []
         for f in fonti:
-            print(f"🔍 Scansione canale: {f['nome']}...")
+            # smista in base al tipo_ingestion; default 'rss' per retrocompatibilità
+            tipo = f['tipo_ingestion'] if 'tipo_ingestion' in f.keys() and f['tipo_ingestion'] else 'rss'
+            strategia = STRATEGIE_INGESTION.get(tipo, _ingest_rss)
             try:
-                feed = feedparser.parse(f['url'])
-                for entry in feed.entries[:10]: # Leggiamo fino a 10 articoli per sicurezza
-                    sommario = entry.summary if hasattr(entry, 'summary') else ""
-                    preview = BeautifulSoup(sommario, "html.parser").get_text()[:250] + "..."
-                    
-                    articoli_scovati.append((
-                        entry.title, 
-                        entry.link, 
-                        preview, 
-                        f['macro'], 
-                        f['area'], 
-                        f['nome']
-                    ))
+                articoli_scovati.extend(strategia(dict(f)))
             except Exception as e:
-                print(f"⚠️ Errore durante lo scraping di {f['nome']}: {e}")
+                logging.error("Ingestion fallita per %s (%s): %s", f['nome'], tipo, str(e))
                 continue
 
-        # 3. Scrittura incrementale nel Database (Evita duplicati automaticamente)
         if articoli_scovati:
-            print(f"💾 Inserimento di {len(articoli_scovati)} potenziali articoli nello storico...")
             query_insert = """
-                INSERT INTO articles (titolo, link, preview, macro, area, fonte) 
-                VALUES (%s, %s, %s, %s, %s, %s) 
+                INSERT INTO articles (titolo, link, preview, macro, area, fonte)
+                VALUES (%s, %s, %s, %s, %s, %s)
                 ON CONFLICT (link) DO NOTHING
             """
             cur.executemany(query_insert, articoli_scovati)
             conn.commit()
-            print("✅ Archivio storico aggiornato con successo e senza duplicati!")
+            logging.info("Database aggiornato: %d articoli candidati.", len(articoli_scovati))
         else:
-            print("ℹ️ Nessun nuovo articolo rilevato dai feed RSS.")
+            logging.info("Nessuna novità rilevata.")
 
         cur.close()
-        conn.close()
-
     except Exception as e:
-        print(f"❌ Errore critico di database: {e}")
+        logging.error("Errore di runtime: %s", str(e))
+        if conn:
+            conn.rollback()
         sys.exit(1)
+    finally:
+        if conn:
+            conn.close()
+
 
 if __name__ == "__main__":
     esegui_scansione_notturna()
