@@ -54,7 +54,9 @@ class LegalRadarDB:
                 nome VARCHAR(150) NOT NULL,
                 url TEXT UNIQUE NOT NULL,
                 area VARCHAR(150),
-                macro VARCHAR(150)
+                macro VARCHAR(150),
+                tipo_fonte VARCHAR(50) DEFAULT 'Ufficiale',
+                tipo_ingestion VARCHAR(50) DEFAULT 'rss'
             )
             """,
             """
@@ -101,6 +103,9 @@ class LegalRadarDB:
             "CREATE INDEX IF NOT EXISTS idx_bookmarks_user ON bookmarks(user_id)",
             "CREATE INDEX IF NOT EXISTS idx_usp_user ON user_source_preferences(user_id)",
             "CREATE INDEX IF NOT EXISTS idx_uas_user_letto ON user_article_status(user_id, letto)",
+            # --- MIGRAZIONE: aggiunge le colonne a sources esistenti senza distruggere dati ---
+            "ALTER TABLE sources ADD COLUMN IF NOT EXISTS tipo_fonte VARCHAR(50) DEFAULT 'Ufficiale'",
+            "ALTER TABLE sources ADD COLUMN IF NOT EXISTS tipo_ingestion VARCHAR(50) DEFAULT 'rss'",
         )
         try:
             with self.get_cursor() as cur:
@@ -160,10 +165,14 @@ class LegalRadarDB:
         with self.get_cursor() as cur:
             cur.execute(query, (user_id, source_id, is_active))
 
-    def aggiungi_fonte(self, nome: str, url: str, area: str, macro: str) -> bool:
+    def aggiungi_fonte(self, nome: str, url: str, area: str, macro: str,
+                       tipo_fonte: str = "Ufficiale", tipo_ingestion: str = "rss") -> bool:
         try:
             with self.get_cursor() as cur:
-                cur.execute("INSERT INTO sources (nome, url, area, macro) VALUES (%s, %s, %s, %s) ON CONFLICT (url) DO NOTHING", (nome, url, area, macro))
+                cur.execute(
+                    "INSERT INTO sources (nome, url, area, macro, tipo_fonte, tipo_ingestion) VALUES (%s, %s, %s, %s, %s, %s) ON CONFLICT (url) DO NOTHING",
+                    (nome, url, area, macro, tipo_fonte, tipo_ingestion),
+                )
             return True
         except Exception as e:
             logging.error("Errore aggiunta fonte: %s", e)
@@ -334,14 +343,14 @@ if not DB_URL:
     st.stop()
 
 DEFAULT_FONTI = [
-    {"nome": "Agenzia Entrate", "url": "https://www.agenziaentrate.gov.it/portale/web/guest/rss/novita", "area": "Diritto Tributario", "macro": "Leggi & Normativa"},
-    {"nome": "Garante Privacy", "url": "https://www.garanteprivacy.it/o/gpdp-rss/rss?c=10490", "area": "Privacy", "macro": "Provvedimenti & Sentenze"},
-    {"nome": "EDPB Europa", "url": "https://edpb.europa.eu/rss.xml", "area": "Privacy", "macro": "Provvedimenti & Sentenze"},
-    {"nome": "Banca d'Italia", "url": "https://www.bancaditalia.it/rss/media.xml", "area": "Diritto Bancario", "macro": "Provvedimenti & Sentenze"},
-    {"nome": "Consob", "url": "https://www.consob.it/web/area-pubblica/rss", "area": "Diritto Bancario", "macro": "Provvedimenti & Sentenze"},
-    {"nome": "IVASS", "url": "https://www.ivass.it/util/index.rss.html?lingua=it", "area": "Diritto assicurativo", "macro": "Leggi & Normativa"},
-    {"nome": "CGUE", "url": "https://curia.europa.eu/site/rss.jsp?lang=it&secondLang=en", "area": "Giurisprudenza UE", "macro": "Provvedimenti & Sentenze"},
-    {"nome": "Altalex", "url": "https://www.altalex.com/rss", "area": "Legale Generale", "macro": "News & Aggiornamenti"}
+    {"nome": "Agenzia Entrate", "url": "https://www.agenziaentrate.gov.it/portale/web/guest/rss/novita", "area": "Diritto Tributario", "macro": "Leggi & Normativa", "tipo_fonte": "Ufficiale", "tipo_ingestion": "rss"},
+    {"nome": "Garante Privacy", "url": "https://www.garanteprivacy.it/o/gpdp-rss/rss?c=10490", "area": "Privacy", "macro": "Provvedimenti & Sentenze", "tipo_fonte": "Autorità", "tipo_ingestion": "rss"},
+    {"nome": "EDPB Europa", "url": "https://edpb.europa.eu/rss.xml", "area": "Privacy", "macro": "Provvedimenti & Sentenze", "tipo_fonte": "Autorità", "tipo_ingestion": "rss"},
+    {"nome": "Banca d'Italia", "url": "https://www.bancaditalia.it/rss/media.xml", "area": "Diritto Bancario", "macro": "Provvedimenti & Sentenze", "tipo_fonte": "Autorità", "tipo_ingestion": "rss"},
+    {"nome": "Consob", "url": "https://www.consob.it/web/area-pubblica/rss", "area": "Diritto Bancario", "macro": "Provvedimenti & Sentenze", "tipo_fonte": "Autorità", "tipo_ingestion": "rss"},
+    {"nome": "IVASS", "url": "https://www.ivass.it/util/index.rss.html?lingua=it", "area": "Diritto assicurativo", "macro": "Leggi & Normativa", "tipo_fonte": "Autorità", "tipo_ingestion": "rss"},
+    {"nome": "CGUE", "url": "https://curia.europa.eu/site/rss.jsp?lang=it&secondLang=en", "area": "Giurisprudenza UE", "macro": "Provvedimenti & Sentenze", "tipo_fonte": "Ufficiale", "tipo_ingestion": "rss"},
+    {"nome": "Altalex", "url": "https://www.altalex.com/rss", "area": "Legale Generale", "macro": "News & Aggiornamenti", "tipo_fonte": "Editoriale", "tipo_ingestion": "rss"}
 ]
 
 # --- ISTANZA DB CACHATA: init_db() e seeding fonti girano UNA SOLA VOLTA per deploy ---
@@ -351,7 +360,7 @@ def get_db() -> LegalRadarDB:
     db.init_db()
     if len(db.carica_fonti()) == 0:
         for f in DEFAULT_FONTI:
-            db.aggiungi_fonte(f['nome'], f['url'], f['area'], f['macro'])
+            db.aggiungi_fonte(f['nome'], f['url'], f['area'], f['macro'], f['tipo_fonte'], f['tipo_ingestion'])
     return db
 
 db = get_db()
@@ -426,20 +435,47 @@ def genera_sintesi_groq(url: str, preview_text: str) -> str:
         return f"⚠️ Errore AI ({r.status_code})"
     except: return "⚠️ Connessione AI fallita."
 
+def _ingest_rss(f: Dict) -> List[Dict]:
+    """Strategia di ingestion per fonti con feed RSS."""
+    risultati = []
+    feed = feedparser.parse(f['url'])
+    for entry in feed.entries[:5]:
+        sommario = entry.summary if hasattr(entry, 'summary') else ""
+        preview = BeautifulSoup(sommario, "html.parser").get_text()[:250] + "..."
+        risultati.append({
+            "Titolo": entry.title, "Link": entry.link, "Preview": preview,
+            "Macro": f['macro'], "Area": f['area'], "Fonte": f['nome']
+        })
+    return risultati
+
+def _ingest_scraper(f: Dict) -> List[Dict]:
+    """Strategia di ingestion per fonti senza RSS (parser HTML dedicato per fonte).
+
+    Punto di aggancio per fonti istituzionali che non espongono RSS.
+    Ogni fonte 'scraper' richiede un parser specifico: la struttura HTML
+    cambia da sito a sito e va gestita caso per caso. Finché non è
+    implementato un parser per la fonte, non produce articoli (fail-safe).
+    """
+    logging.info("Fonte '%s' di tipo scraper: parser dedicato non ancora implementato.", f['nome'])
+    return []
+
+# Dispatcher: associa il tipo_ingestion alla strategia corretta
+STRATEGIE_INGESTION = {
+    "rss": _ingest_rss,
+    "scraper": _ingest_scraper,
+}
+
 def sincronizza_radar_in_database() -> None:
     fonti = db.carica_fonti()
     articoli_scovati = []
     for f in fonti:
+        tipo = f.get('tipo_ingestion', 'rss')
+        strategia = STRATEGIE_INGESTION.get(tipo, _ingest_rss)
         try:
-            feed = feedparser.parse(f['url'])
-            for entry in feed.entries[:5]:
-                sommario = entry.summary if hasattr(entry, 'summary') else ""
-                preview = BeautifulSoup(sommario, "html.parser").get_text()[:250] + "..."
-                articoli_scovati.append({
-                    "Titolo": entry.title, "Link": entry.link, "Preview": preview,
-                    "Macro": f['macro'], "Area": f['area'], "Fonte": f['nome']
-                })
-        except: continue
+            articoli_scovati.extend(strategia(f))
+        except Exception as e:
+            logging.error("Ingestion fallita per %s (%s): %s", f['nome'], tipo, e)
+            continue
     if articoli_scovati:
         db.salva_articoli_storico(articoli_scovati)
 
@@ -627,7 +663,14 @@ elif pagina_pulita == "⚙️ Gestione Fonti":
     fonti_personali = db.carica_fonti_con_preferenze(st.session_state.user['id'])
     for f in fonti_personali:
         col_info, col_toggle = st.columns([4, 1])
-        col_info.markdown(f"**{f['nome']}** — *{f['area']}* ({f['macro']})")
+        tipo_f = f.get('tipo_fonte', 'Ufficiale')
+        tipo_i = f.get('tipo_ingestion', 'rss')
+        emoji_tipo = {"Ufficiale": "🏛️", "Autorità": "⚖️", "Editoriale": "📰"}.get(tipo_f, "📄")
+        col_info.markdown(
+            f"**{f['nome']}** {emoji_tipo} <span style='font-size:11px;color:#888;'>({tipo_f} · {tipo_i})</span><br>"
+            f"<span style='font-size:13px;color:#555;'>*{f['area']}* — {f['macro']}</span>",
+            unsafe_allow_html=True
+        )
         
         # Gestione interruttore ON/OFF in tempo reale
         is_on = col_toggle.toggle("Attivo", value=f['utente_attiva'], key=f"tog_{f['id']}")
@@ -639,15 +682,24 @@ elif pagina_pulita == "⚙️ Gestione Fonti":
     
     # SEZIONE 2 - AGGIUNTA GLOBALE (Per tutti)
     st.subheader("➕ Aggiungi Nuova Fonte (Globale)")
+    st.caption("Le sezioni *Leggi* e *Provvedimenti* sono riservate a fonti Ufficiali e Autorità. "
+               "Le fonti Editoriali sono ammesse solo in *News & Aggiornamenti*.")
     with st.form("form_aggiunta_fonte", clear_on_submit=True):
         c1, c2 = st.columns(2)
         n_nome = c1.text_input("Nome Autorità / Sito")
-        n_url = c1.text_input("URL Feed RSS")
+        n_url = c1.text_input("URL Feed RSS / Pagina")
+        n_tipo_fonte = c1.selectbox("Tipo di fonte", ["Ufficiale", "Autorità", "Editoriale"])
         n_macro = c2.selectbox("Categoria Macro", ["Leggi & Normativa", "Provvedimenti & Sentenze", "News & Aggiornamenti"])
         n_area = c2.text_input("Materia Giuridica (es. Compliance, Privacy)")
+        n_tipo_ingestion = c2.selectbox("Modalità di acquisizione", ["rss", "scraper"],
+                                        help="'rss' per feed standard. 'scraper' richiede un parser dedicato (avanzato).")
         if st.form_submit_button("➕ Salva Fonte nel Database Comune"):
-            if n_nome and n_url and n_area:
-                if db.aggiungi_fonte(n_nome, n_url, n_area, n_macro):
+            # Regola di coerenza: Editoriale ammessa solo in News
+            if n_tipo_fonte == "Editoriale" and n_macro != "News & Aggiornamenti":
+                st.error("Le fonti Editoriali sono ammesse solo nella sezione 'News & Aggiornamenti'. "
+                         "Per Leggi e Provvedimenti usa fonti Ufficiali o Autorità.")
+            elif n_nome and n_url and n_area:
+                if db.aggiungi_fonte(n_nome, n_url, n_area, n_macro, n_tipo_fonte, n_tipo_ingestion):
                     st.success(f"Fonte '{n_nome}' registrata nel database globale!")
                     st.rerun()
                 else:
