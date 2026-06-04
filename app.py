@@ -6,6 +6,7 @@ import requests
 import os
 import re
 import json
+import html
 import logging
 from contextlib import contextmanager
 from bs4 import BeautifulSoup
@@ -746,8 +747,14 @@ def mostra_hub_legale(lista_articoli: List[Dict], tipo_bacheca: str):
             e_letto = art.get('letto', False)
             classe_card = "radar-card-letto" if e_letto else "radar-card"
             badge_nuovo = "" if e_letto else '<span class="badge-nuovo">Nuovo</span>'
+            # Escape di tutti i testi: evita che contenuti con caratteri HTML (es. < > nel riassunto AI) rompano la card
+            e_area = html.escape(str(art.get('area') or ''))
+            e_fonte = html.escape(str(art.get('fonte') or ''))
+            e_titolo = html.escape(str(art.get('titolo') or ''))
+            e_preview = html.escape(str(art.get('preview') or ''))
+            e_link = html.escape(str(art.get('link') or ''), quote=True)
             rango = art.get('tipo_fonte')
-            tag_rango = f'<span class="meta-tag tag-rango">{rango}</span>' if rango else ''
+            tag_rango = f'<span class="meta-tag tag-rango">{html.escape(str(rango))}</span>' if rango else ''
             # Badge rilevanza (solo priorità visiva, non nasconde nulla)
             rilevanza = art.get('rilevanza')
             if rilevanza == "alta":
@@ -758,18 +765,18 @@ def mostra_hub_legale(lista_articoli: List[Dict], tipo_bacheca: str):
                 badge_ril = ''
             # Micro-riassunto AI sotto il titolo (se presente)
             riassunto = art.get('riassunto_ai')
-            blocco_riassunto = f'<div class="card-microsummary">✦ {riassunto}</div>' if riassunto else ''
+            blocco_riassunto = f'<div class="card-microsummary">✦ {html.escape(str(riassunto))}</div>' if riassunto else ''
             st.markdown(f"""
             <div class="{classe_card}">
                 <div>
-                    <span class="meta-tag tag-area">{art['area']}</span>
-                    <span class="meta-tag tag-fonte">{art['fonte']}</span>
+                    <span class="meta-tag tag-area">{e_area}</span>
+                    <span class="meta-tag tag-fonte">{e_fonte}</span>
                     {tag_rango}
                     {badge_ril}
                 </div>
-                <a href="{art['link']}" target="_blank" class="card-title">{art['titolo']}{badge_nuovo}</a>
+                <a href="{e_link}" target="_blank" class="card-title">{e_titolo}{badge_nuovo}</a>
                 {blocco_riassunto}
-                <div class="card-preview">{art['preview']}</div>
+                <div class="card-preview">{e_preview}</div>
             </div>
             """, unsafe_allow_html=True)
             
@@ -865,11 +872,15 @@ if pagina_pulita == "🏠 Dashboard":
     alert_urgenti = db.estrai_ultimi_alert_urgenti(st.session_state.user['id'])
     if alert_urgenti:
         for al in alert_urgenti:
+            a_fonte = html.escape(str(al.get('fonte') or ''))
+            a_area = html.escape(str(al.get('area') or ''))
+            a_titolo = html.escape(str(al.get('titolo') or ''))
+            a_link = html.escape(str(al.get('link') or ''), quote=True)
             st.markdown(f"""
             <div style="background: white; border-radius: 8px; padding: 15px; border: 1px solid #eaeaea; border-left: 4px solid #d32f2f; margin-bottom: 10px;">
                 <span style="font-size: 11px; font-weight: bold; color: #d32f2f; text-transform: uppercase;">⚠️ ALERT</span> | 
-                <span style="font-size: 12px; color: #666;">{al['fonte']} ({al['area']})</span><br>
-                <a href="{al['link']}" target="_blank" style="font-weight: 600; color: #1a1a1a; text-decoration: none; font-size: 15px;">{al['titolo']}</a>
+                <span style="font-size: 12px; color: #666;">{a_fonte} ({a_area})</span><br>
+                <a href="{a_link}" target="_blank" style="font-weight: 600; color: #1a1a1a; text-decoration: none; font-size: 15px;">{a_titolo}</a>
             </div>
             """, unsafe_allow_html=True)
     else:
@@ -925,8 +936,8 @@ elif pagina_pulita == "⚙️ Gestione Fonti":
         tipo_i = f.get('tipo_ingestion', 'rss')
         emoji_tipo = {"Ufficiale": "🏛️", "Autorità": "⚖️", "Editoriale": "📰"}.get(tipo_f, "📄")
         col_info.markdown(
-            f"**{f['nome']}** {emoji_tipo} <span style='font-size:11px;color:#888;'>({tipo_f} · {tipo_i})</span><br>"
-            f"<span style='font-size:13px;color:#555;'>*{f['area']}* — {f['macro']}</span>",
+            f"**{html.escape(str(f['nome']))}** {emoji_tipo} <span style='font-size:11px;color:#888;'>({tipo_f} · {tipo_i})</span><br>"
+            f"<span style='font-size:13px;color:#555;'>{html.escape(str(f['area']))} — {html.escape(str(f['macro']))}</span>",
             unsafe_allow_html=True
         )
         
@@ -976,7 +987,7 @@ elif pagina_pulita == "⚙️ Gestione Fonti":
         st.caption("Elenco delle fonti del catalogo comune. L'eliminazione è riservata agli amministratori.")
     for f in fonti_personali:
         col_t, col_b = st.columns([5, 1])
-        col_t.markdown(f"**{f['nome']}** - <span style='font-size:12px;color:#888;'>{f['url']}</span>", unsafe_allow_html=True)
+        col_t.markdown(f"**{html.escape(str(f['nome']))}** - <span style='font-size:12px;color:#888;'>{html.escape(str(f['url']))}</span>", unsafe_allow_html=True)
         if is_admin:
             if col_b.button("Elimina", key=f"del_src_{f['id']}"):
                 db.rimuovi_fonte(f['id'])
