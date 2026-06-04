@@ -280,10 +280,11 @@ class LegalRadarDB:
     # --- MODIFICA: ESTRAZIONE ARCHIVIO FILTRATO SULLE PREFERENZE UTENTE + STATO LETTO ---
     def estrai_archivio(self, filtro_macro: str, user_id: int, ricerca_testo: str = "") -> List[Dict]:
         query = """
-            SELECT a.*, COALESCE(uas.letto, FALSE) AS letto
+            SELECT a.*, COALESCE(uas.letto, FALSE) AS letto, src.tipo_fonte
             FROM articles a
             LEFT JOIN user_article_status uas
                 ON uas.article_id = a.id AND uas.user_id = %s
+            LEFT JOIN sources src ON src.nome = a.fonte
             WHERE a.macro = %s 
             AND a.fonte NOT IN (
                 SELECT s.nome FROM sources s
@@ -315,11 +316,12 @@ class LegalRadarDB:
 
     def estrai_bookmarks(self, user_id: int, ricerca_testo: str = "") -> List[Dict]:
         query = """
-            SELECT a.*, COALESCE(uas.letto, FALSE) AS letto
+            SELECT a.*, COALESCE(uas.letto, FALSE) AS letto, src.tipo_fonte
             FROM articles a 
             JOIN bookmarks b ON a.id = b.article_id 
             LEFT JOIN user_article_status uas
                 ON uas.article_id = a.id AND uas.user_id = %s
+            LEFT JOIN sources src ON src.nome = a.fonte
             WHERE b.user_id = %s
         """
         params = [user_id, user_id]
@@ -453,20 +455,58 @@ if 'ai_summaries' not in st.session_state: st.session_state.ai_summaries = {}
 # --- 3. STILE GRAFICO ---
 st.markdown("""
 <style>
-    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
-    html, body, [class*="css"] { font-family: 'Inter', sans-serif; background-color: #f7f9fc; }
-    div.stButton > button[kind="primary"] { background-color: #ff6600; color: white; border: none; font-weight: 600; border-radius: 8px;}
-    div.stButton > button[kind="primary"]:hover { background-color: #e65c00; box-shadow: 0 4px 8px rgba(255, 102, 0, 0.3); }
-    .radar-card { background: white; border-radius: 12px; padding: 24px; border: 1px solid #eaeaea; margin-bottom: 20px; border-left: 6px solid #ff6600; box-shadow: 0 2px 8px rgba(0,0,0,0.04); }
-    .radar-card-letto { background: #fbfbfc; border-radius: 12px; padding: 24px; border: 1px solid #eee; margin-bottom: 20px; border-left: 6px solid #cfd3da; box-shadow: none; opacity: 0.78; }
-    .badge-nuovo { display: inline-block; padding: 3px 9px; border-radius: 20px; font-size: 10px; font-weight: 800; text-transform: uppercase; margin-left: 8px; background: #ff6600; color: white; letter-spacing: 0.5px; vertical-align: middle; }
-    .card-title { font-size: 19px; font-weight: 700; color: #1a1a1a; text-decoration: none; margin-bottom: 12px; display: block; line-height: 1.3; }
-    .card-title:hover { color: #ff6600; }
-    .card-preview { font-size: 14px; color: #4a4a4a; margin-bottom: 15px; line-height: 1.6; }
-    .card-summary { font-size: 14px; color: #222; line-height: 1.6; background: #fff5eb; border: 1px solid #ffd6b3; padding: 18px; border-radius: 8px; margin-top: 15px; box-shadow: inset 0 1px 3px rgba(0,0,0,0.02); }
-    .meta-tag { display: inline-block; padding: 4px 10px; border-radius: 20px; font-size: 11px; font-weight: 700; text-transform: uppercase; margin-right: 8px; margin-bottom: 12px;}
-    .tag-area { background: #eef2ff; color: #4338ca; }
-    .tag-fonte { background: #fff3eb; color: #ff6600; border: 1px solid #ffd6b3;}
+    @import url('https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600&family=Inter:wght@400;500;600;700&display=swap');
+
+    :root{
+        --ink:#211a14; --ink-soft:#5c5147; --ink-faint:#9a8f82;
+        --paper:#f6f1ea; --surface:#fffdf9; --line:#e7ddd0;
+        --brand:#c2410c; --brand-deep:#9a330a; --brand-soft:#fbe9d9; --brand-tint:#fdf2ea;
+        --gold-soft:#f5ead6; --gold-ink:#7a5414;
+        --danger:#b3261e; --danger-soft:#fbe7e4;
+    }
+
+    /* sfondo app e tipografia base */
+    .stApp { background-color: var(--paper); }
+    html, body, [class*="css"] { font-family: 'Inter', sans-serif; color: var(--ink); }
+
+    /* titoli nativi (st.title/header/subheader) in serif */
+    h1, h2, h3 { font-family: 'Fraunces', serif !important; letter-spacing: -0.3px; color: var(--ink) !important; }
+
+    /* sidebar */
+    section[data-testid="stSidebar"] { background-color: var(--surface); border-right: 1px solid var(--line); }
+
+    /* bottoni nativi */
+    div.stButton > button { font-family:'Inter',sans-serif; font-weight:600; border-radius:6px; border:1px solid var(--line); color:var(--ink-soft); background:var(--surface); transition:all .15s; }
+    div.stButton > button:hover { border-color:var(--brand); color:var(--brand); }
+    div.stButton > button[kind="primary"] { background-color: var(--brand); color: #fff; border: none; }
+    div.stButton > button[kind="primary"]:hover { background-color: var(--brand-deep); box-shadow: 0 4px 14px rgba(194,65,12,0.25); color:#fff; }
+
+    /* input e ricerca */
+    div[data-testid="stTextInput"] input { border-radius:6px; border:1px solid var(--line); }
+    div[data-testid="stTextInput"] input:focus { border-color:var(--brand); box-shadow:0 0 0 2px var(--brand-soft); }
+
+    /* metriche native */
+    div[data-testid="stMetric"] { background: var(--surface); border:1px solid var(--line); border-top:3px solid var(--brand); border-radius:6px; padding:16px 18px; }
+    div[data-testid="stMetricValue"] { font-family:'Fraunces',serif; color:var(--brand); }
+    div[data-testid="stMetricLabel"] { color:var(--ink-faint); text-transform:uppercase; letter-spacing:0.5px; font-size:12px; }
+
+    /* ---- CARD ARTICOLO ---- */
+    .radar-card { background: var(--surface); border-radius: 8px; padding: 22px 24px; border: 1px solid var(--line); border-left: 4px solid var(--brand); margin-bottom: 18px; transition: transform .18s, box-shadow .18s; }
+    .radar-card:hover { transform: translateY(-2px); box-shadow: 0 6px 20px rgba(194,65,12,0.08); }
+    .radar-card-letto { background: #faf6f0; border-radius: 8px; padding: 22px 24px; border: 1px solid var(--line); border-left: 4px solid var(--line); margin-bottom: 18px; opacity: 0.72; }
+    .badge-nuovo { display: inline-block; padding: 3px 10px; border-radius: 4px; font-size: 10px; font-weight: 700; text-transform: uppercase; margin-left: 8px; background: var(--brand); color: #fff; letter-spacing: 1px; vertical-align: middle; }
+
+    .card-title { font-family:'Fraunces',serif; font-size: 20px; font-weight: 600; color: var(--ink); text-decoration: none; margin-bottom: 10px; display: block; line-height: 1.3; }
+    .card-title:hover { color: var(--brand); }
+    .card-preview { font-size: 14.5px; color: var(--ink-soft); margin-bottom: 4px; line-height: 1.65; }
+
+    .card-summary { font-size: 14px; color: var(--brand-deep); line-height: 1.5; background: var(--brand-tint); border: 1px solid #f3d5bf; padding: 14px 18px; border-radius: 6px; margin-top: 15px; font-weight:600; }
+
+    /* ---- TAG ---- */
+    .meta-tag { display: inline-block; padding: 3px 10px; border-radius: 4px; font-size: 11px; font-weight: 700; text-transform: uppercase; margin-right: 8px; margin-bottom: 12px; letter-spacing:0.4px; }
+    .tag-area { background: var(--brand-soft); color: var(--brand-deep); }
+    .tag-fonte { background: var(--gold-soft); color: var(--gold-ink); }
+    .tag-rango { background: transparent; color: var(--ink-faint); border: 1px solid var(--line); }
 </style>
 """, unsafe_allow_html=True)
 
@@ -645,11 +685,14 @@ def mostra_hub_legale(lista_articoli: List[Dict], tipo_bacheca: str):
             e_letto = art.get('letto', False)
             classe_card = "radar-card-letto" if e_letto else "radar-card"
             badge_nuovo = "" if e_letto else '<span class="badge-nuovo">Nuovo</span>'
+            rango = art.get('tipo_fonte')
+            tag_rango = f'<span class="meta-tag tag-rango">{rango}</span>' if rango else ''
             st.markdown(f"""
             <div class="{classe_card}">
                 <div>
                     <span class="meta-tag tag-area">{art['area']}</span>
                     <span class="meta-tag tag-fonte">{art['fonte']}</span>
+                    {tag_rango}
                 </div>
                 <a href="{art['link']}" target="_blank" class="card-title">{art['titolo']}{badge_nuovo}</a>
                 <div class="card-preview">{art['preview']}</div>
@@ -682,7 +725,7 @@ def mostra_hub_legale(lista_articoli: List[Dict], tipo_bacheca: str):
             link = art['link']
             if link in st.session_state.ai_summaries:
                 # Sfruttiamo il markdown nativo di Streamlit per interpretare l'output strutturato dell'AI
-                st.markdown("<div class='card-summary'>🤖 <b>Analisi Strategica Legal-Tech:</b></div>", unsafe_allow_html=True)
+                st.markdown("<div class='card-summary'>✦ Analisi strategica legal-tech</div>", unsafe_allow_html=True)
                 st.markdown(st.session_state.ai_summaries[link])
             else:
                 with c3:
@@ -719,9 +762,21 @@ if pagina_pulita not in ["⚙️ Gestione Fonti", "🏠 Dashboard"]:
 
 # --- ROUTING PAGINE ---
 if pagina_pulita == "🏠 Dashboard":
-    st.title(f"Benvenuto nel tuo Hub, {st.session_state.user['username']}! 👋")
-    st.caption(f"Stato dell'Intelligence Normativa al {datetime.now().strftime('%d/%m/%Y')}")
-    st.write("")
+    oggi = datetime.now().strftime('%d/%m/%Y')
+    st.markdown(f"""
+    <div style="border-bottom:3px solid var(--brand); padding-bottom:14px; margin-bottom:6px;
+                display:flex; align-items:flex-end; justify-content:space-between;">
+        <div style="font-family:'Fraunces',serif; font-weight:600; font-size:34px; letter-spacing:-0.5px; color:var(--ink);">
+            Legal Radar<span style="color:var(--brand);">.</span>
+        </div>
+        <div style="font-size:12px; text-transform:uppercase; letter-spacing:2px; color:var(--brand); font-weight:700;">
+            Regulatory Intelligence
+        </div>
+    </div>
+    <div style="font-size:13px; color:var(--ink-soft); font-style:italic; margin-bottom:24px;">
+        Rassegna per {st.session_state.user['username']} · {oggi}
+    </div>
+    """, unsafe_allow_html=True)
     
     metriche = db.estrai_metriche_dashboard(st.session_state.user['id'])
     c1, c2, c3 = st.columns(3)
