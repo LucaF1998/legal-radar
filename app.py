@@ -56,7 +56,10 @@ class LegalRadarDB:
                 area VARCHAR(150),
                 macro VARCHAR(150),
                 tipo_fonte VARCHAR(50) DEFAULT 'Ufficiale',
-                tipo_ingestion VARCHAR(50) DEFAULT 'rss'
+                tipo_ingestion VARCHAR(50) DEFAULT 'rss',
+                ultima_sync TIMESTAMP,
+                ultimo_esito VARCHAR(20),
+                ultimo_messaggio TEXT
             )
             """,
             """
@@ -106,6 +109,9 @@ class LegalRadarDB:
             # --- MIGRAZIONE: aggiunge le colonne a sources esistenti senza distruggere dati ---
             "ALTER TABLE sources ADD COLUMN IF NOT EXISTS tipo_fonte VARCHAR(50) DEFAULT 'Ufficiale'",
             "ALTER TABLE sources ADD COLUMN IF NOT EXISTS tipo_ingestion VARCHAR(50) DEFAULT 'rss'",
+            "ALTER TABLE sources ADD COLUMN IF NOT EXISTS ultima_sync TIMESTAMP",
+            "ALTER TABLE sources ADD COLUMN IF NOT EXISTS ultimo_esito VARCHAR(20)",
+            "ALTER TABLE sources ADD COLUMN IF NOT EXISTS ultimo_messaggio TEXT",
         )
         try:
             with self.get_cursor() as cur:
@@ -224,6 +230,39 @@ class LegalRadarDB:
     def rimuovi_fonte(self, fonte_id: int) -> None:
         with self.get_cursor() as cur:
             cur.execute("DELETE FROM sources WHERE id = %s", (fonte_id,))
+
+    # --- AGGIUNTA: SALUTE DELLE FONTI ---
+    def registra_esito_sync(self, source_id: int, esito: str, messaggio: str = "") -> None:
+        """Registra l'esito dell'ultima sincronizzazione di una fonte.
+        esito atteso: 'ok' | 'vuoto' | 'errore'."""
+        query = """
+            UPDATE sources
+            SET ultima_sync = CURRENT_TIMESTAMP,
+                ultimo_esito = %s,
+                ultimo_messaggio = %s
+            WHERE id = %s
+        """
+        with self.get_cursor() as cur:
+            cur.execute(query, (esito, messaggio[:500] if messaggio else None, source_id))
+
+    def carica_salute_fonti(self) -> List[Dict]:
+        """Stato di salute di ogni fonte + n. articoli negli ultimi 30 giorni."""
+        query = """
+            SELECT s.id, s.nome, s.url, s.area, s.macro, s.tipo_fonte, s.tipo_ingestion,
+                   s.ultima_sync, s.ultimo_esito, s.ultimo_messaggio,
+                   COUNT(a.id) FILTER (
+                       WHERE a.data_scansione >= CURRENT_TIMESTAMP - INTERVAL '30 days'
+                   ) AS articoli_30gg
+            FROM sources s
+            LEFT JOIN articles a ON a.fonte = s.nome
+            GROUP BY s.id, s.nome, s.url, s.area, s.macro, s.tipo_fonte, s.tipo_ingestion,
+                     s.ultima_sync, s.ultimo_esito, s.ultimo_messaggio
+            ORDER BY s.nome ASC
+        """
+        with self.get_cursor(dict_cursor=True) as cur:
+            cur.execute(query)
+            righe = cur.fetchall()
+        return [dict(r) for r in righe]
 
     def salva_articoli_storico(self, articoli_lista: List[Dict]) -> None:
         query = """
@@ -515,9 +554,16 @@ def sincronizza_radar_in_database() -> None:
         tipo = f.get('tipo_ingestion', 'rss')
         strategia = STRATEGIE_INGESTION.get(tipo, _ingest_rss)
         try:
-            articoli_scovati.extend(strategia(f))
+            trovati = strategia(f)
+            articoli_scovati.extend(trovati)
+            # Registra la salute: ok se ha prodotto articoli, vuoto altrimenti
+            if trovati:
+                db.registra_esito_sync(f['id'], "ok", f"{len(trovati)} elementi rilevati")
+            else:
+                db.registra_esito_sync(f['id'], "vuoto", "Nessun elemento dal feed")
         except Exception as e:
             logging.error("Ingestion fallita per %s (%s): %s", f['nome'], tipo, e)
+            db.registra_esito_sync(f['id'], "errore", str(e))
             continue
     if articoli_scovati:
         db.salva_articoli_storico(articoli_scovati)
@@ -648,6 +694,22 @@ def mostra_hub_legale(lista_articoli: List[Dict], tipo_bacheca: str):
                             st.rerun()
             st.write("")
 
+def _semaforo_fonte(s: Dict) -> Tuple[str, str]:
+    """Calcola il semaforo di salute di una fonte.
+    Ritorna (emoji, descrizione)."""
+    esito = s.get('ultimo_esito')
+    ultima = s.get('ultima_sync')
+    if esito == "errore":
+        return "🔴", "In errore all'ultima sincronizzazione"
+    if not ultima:
+        return "⚪", "Mai sincronizzata"
+    giorni = (datetime.now() - ultima).days
+    if giorni <= 10:
+        return "🟢", "Attiva"
+    if giorni <= 30:
+        return "🟡", "Silenziosa da oltre 10 giorni"
+    return "🟡", "Silenziosa da oltre 30 giorni"
+
 # Le label di navigazione possono avere un suffisso conteggio "(3)": lo rimuovo per il routing
 pagina_pulita = re.sub(r"\s*\(\d+\)$", "", pagina)
 
@@ -704,7 +766,25 @@ elif pagina_pulita == "🔖 I Miei Salvati":
 
 elif pagina_pulita == "⚙️ Gestione Fonti":
     st.header("Database & Personalizzazione Fonti")
-    
+
+    # SEZIONE 0 - STATO DI SALUTE DEI CANALI
+    st.subheader("🩺 Stato di Salute dei Canali")
+    st.caption("Semaforo basato sull'ultima sincronizzazione. 🟢 attiva · 🟡 silenziosa · 🔴 in errore · ⚪ mai sincronizzata.")
+    salute = db.carica_salute_fonti()
+    n_rosse = sum(1 for s in salute if _semaforo_fonte(s)[0] == "🔴")
+    if n_rosse:
+        st.warning(f"Attenzione: {n_rosse} fonte/i in errore. Verifica l'URL del feed.")
+    for s in salute:
+        emoji, descrizione = _semaforo_fonte(s)
+        sync_txt = s['ultima_sync'].strftime('%d/%m/%Y %H:%M') if s.get('ultima_sync') else "mai"
+        col_s1, col_s2, col_s3 = st.columns([3, 2, 2])
+        col_s1.markdown(f"{emoji} **{s['nome']}**")
+        col_s2.caption(f"Ultima sync: {sync_txt}")
+        col_s3.caption(f"Articoli 30gg: {s.get('articoli_30gg', 0)}")
+        if emoji == "🔴" and s.get('ultimo_messaggio'):
+            col_s1.caption(f"↳ {s['ultimo_messaggio'][:120]}")
+    st.divider()
+
     # MODIFICA: SEZIONE 1 - INTERFACCIA ON/OFF PERSONALE (Punto 1)
     st.subheader("🎛️ Il Tuo Pannello di Controllo Canali (Personale)")
     st.caption("Spegni i canali che non vuoi vedere nel tuo feed. Questa modifica ha effetto solo sul tuo account.")
