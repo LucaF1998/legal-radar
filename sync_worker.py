@@ -19,24 +19,36 @@ logging.basicConfig(
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "").strip()
 
 
-def genera_microriassunto(titolo: str, preview: str) -> Tuple[Optional[str], Optional[str], Optional[str], Optional[str]]:
-    """Riassunto + rilevanza + tipo_atto + tema via Groq (JSON). Fail-safe: tutti None su errore."""
+def genera_microriassunto(titolo: str, preview: str, e_ufficiale: bool = True) -> Tuple[Optional[str], Optional[str], Optional[str], Optional[str]]:
+    """Riassunto + rilevanza + categoria + tema via Groq (JSON). Fail-safe: tutti None su errore.
+    Per fonti ufficiali la categoria è legge/provvedimento; per editoriali non viene chiesta (sarà 'news')."""
     if not GROQ_API_KEY.startswith("gsk_"):
         return None, None, None, None
     api_url = "https://api.groq.com/openai/v1/chat/completions"
     headers = {"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"}
+
+    if e_ufficiale:
+        regola_cat = '"categoria": "<legge|provvedimento>", '
+        spiega_cat = (
+            "- categoria: \"legge\" SOLO per testi normativi (legge, decreto legge, decreto legislativo, "
+            "regolamento UE, direttiva, testo unico, codice); \"provvedimento\" per ogni altro atto di autorità "
+            "(sanzioni, ordinanze, delibere, linee guida, pareri, comunicazioni). Nel dubbio scegli \"provvedimento\".\n"
+        )
+    else:
+        regola_cat = ""
+        spiega_cat = ""
+
     system_prompt = (
         "Sei un assistente legale che pre-analizza novità normative, giurisprudenziali e di settore per un team "
         "di compliance specializzato nei comparatori online italiani (finanza, assicurazioni, utility). "
         "Dato titolo e anteprima, rispondi ESCLUSIVAMENTE con un oggetto JSON valido, senza testo prima o dopo:\n"
         '{"riassunto": "<1-2 frasi in italiano>", "rilevanza": "<alta|media>", '
-        '"tipo_atto": "<sentenza|provvedimento|news>", "tema": "<tema giuridico principale>"}\n\n'
+        + regola_cat +
+        '"tema": "<tema giuridico principale>"}\n\n'
         "Regole:\n"
         "- rilevanza: \"alta\" se impatta direttamente i comparatori (sanzioni, telemarketing, consenso, "
         "trasparenza tariffaria, data breach, intermediazione); \"media\" altrimenti.\n"
-        "- tipo_atto: \"sentenza\" per pronunce giurisdizionali (Corti, tribunali, CGUE); "
-        "\"provvedimento\" per atti di autorità/regolatori (Garante, IVASS, Consob, delibere, linee guida, ordinanze); "
-        "\"news\" per articoli giornalistici/editoriali e comunicati divulgativi.\n"
+        + spiega_cat +
         "- tema: tema giuridico principale. Preferisci uno tra: Privacy, Cybersecurity, Assicurativo, "
         "Bancario e finanziario, Tributario, Consumatori e pratiche commerciali, Concorrenza, Intelligenza artificiale. "
         "Se nessuno calza, indica tu il tema più appropriato in 1-3 parole."
@@ -60,11 +72,11 @@ def genera_microriassunto(titolo: str, preview: str) -> Tuple[Optional[str], Opt
         rilevanza = (dati.get("rilevanza") or "").strip().lower()
         if rilevanza not in ("alta", "media"):
             rilevanza = None
-        tipo_atto = (dati.get("tipo_atto") or "").strip().lower()
-        if tipo_atto not in ("sentenza", "provvedimento", "news"):
-            tipo_atto = None
+        categoria = (dati.get("categoria") or "").strip().lower()
+        if categoria not in ("legge", "provvedimento"):
+            categoria = None
         tema = (dati.get("tema") or "").strip()[:100] or None
-        return riassunto, rilevanza, tipo_atto, tema
+        return riassunto, rilevanza, categoria, tema
     except Exception as e:
         logging.error("Microriassunto fallito per '%s': %s", titolo[:50], e)
         return None, None, None, None
@@ -76,15 +88,18 @@ def genera_microriassunto(titolo: str, preview: str) -> Tuple[Optional[str], Opt
 def _ingest_rss(f: Dict) -> List[Tuple]:
     """Ingestion per fonti con feed RSS. Ritorna tuple pronte per executemany."""
     risultati: List[Tuple] = []
+    tf = (f.get('tipo_fonte') or 'Ufficiale').lower()
+    e_ufficiale = tf != "editoriale"
     feed = feedparser.parse(f['url'])
     for entry in feed.entries[:10]:
         sommario = entry.summary if hasattr(entry, 'summary') else ""
         preview = BeautifulSoup(sommario, "html.parser").get_text()[:250] + "..."
-        riassunto, rilevanza, tipo_atto, tema = genera_microriassunto(entry.title, preview)
-        # Fallback garantito: tipo_atto e tema non devono MAI essere vuoti
-        if not tipo_atto:
-            tf = (f.get('tipo_fonte') or 'Ufficiale').lower()
-            tipo_atto = "news" if tf == "editoriale" else "provvedimento"
+        riassunto, rilevanza, categoria, tema = genera_microriassunto(entry.title, preview, e_ufficiale=e_ufficiale)
+        # Regola fonte -> categoria, con fallback garantito (mai vuota)
+        if not e_ufficiale:
+            categoria = "news"
+        elif not categoria:
+            categoria = "provvedimento"  # fallback sicuro per atti ufficiali
         if not tema:
             tema = f.get('area') or "Generale"
         if not rilevanza:
@@ -98,7 +113,7 @@ def _ingest_rss(f: Dict) -> List[Tuple]:
             f['nome'],
             riassunto,
             rilevanza,
-            tipo_atto,
+            categoria,
             tema,
         ))
     return risultati
