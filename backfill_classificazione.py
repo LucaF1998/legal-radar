@@ -27,22 +27,32 @@ DB_URL = os.getenv("DB_URL", "")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "").strip()
 
 
-def classifica(titolo: str, preview: str) -> Tuple[Optional[str], Optional[str], Optional[str], Optional[str]]:
+def classifica(titolo: str, preview: str, e_ufficiale: bool = True) -> Tuple[Optional[str], Optional[str], Optional[str], Optional[str]]:
     if not GROQ_API_KEY.startswith("gsk_"):
         return None, None, None, None
     api_url = "https://api.groq.com/openai/v1/chat/completions"
     headers = {"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"}
+    if e_ufficiale:
+        regola_cat = '"categoria": "<legge|provvedimento>", '
+        spiega_cat = (
+            "- categoria: \"legge\" SOLO per testi normativi (legge, decreto legge, decreto legislativo, "
+            "regolamento UE, direttiva, testo unico, codice); \"provvedimento\" per ogni altro atto di autorità "
+            "(sanzioni, ordinanze, delibere, linee guida, pareri, comunicazioni). Nel dubbio scegli \"provvedimento\".\n"
+        )
+    else:
+        regola_cat = ""
+        spiega_cat = ""
     system_prompt = (
         "Sei un assistente legale che pre-analizza novità normative, giurisprudenziali e di settore per un team "
         "di compliance specializzato nei comparatori online italiani (finanza, assicurazioni, utility). "
         "Dato titolo e anteprima, rispondi ESCLUSIVAMENTE con un oggetto JSON valido, senza testo prima o dopo:\n"
         '{"riassunto": "<1-2 frasi in italiano>", "rilevanza": "<alta|media>", '
-        '"tipo_atto": "<sentenza|provvedimento|news>", "tema": "<tema giuridico principale>"}\n\n'
+        + regola_cat +
+        '"tema": "<tema giuridico principale>"}\n\n'
         "Regole:\n"
         "- rilevanza: \"alta\" se impatta direttamente i comparatori (sanzioni, telemarketing, consenso, "
         "trasparenza tariffaria, data breach, intermediazione); \"media\" altrimenti.\n"
-        "- tipo_atto: \"sentenza\" per pronunce giurisdizionali; \"provvedimento\" per atti di autorità/regolatori; "
-        "\"news\" per articoli giornalistici/editoriali e comunicati divulgativi.\n"
+        + spiega_cat +
         "- tema: tema giuridico principale. Preferisci uno tra: Privacy, Cybersecurity, Assicurativo, "
         "Bancario e finanziario, Tributario, Consumatori e pratiche commerciali, Concorrenza, Intelligenza artificiale. "
         "Se nessuno calza, indica tu il tema in 1-3 parole."
@@ -66,11 +76,11 @@ def classifica(titolo: str, preview: str) -> Tuple[Optional[str], Optional[str],
         rilevanza = (dati.get("rilevanza") or "").strip().lower()
         if rilevanza not in ("alta", "media"):
             rilevanza = None
-        tipo_atto = (dati.get("tipo_atto") or "").strip().lower()
-        if tipo_atto not in ("sentenza", "provvedimento", "news"):
-            tipo_atto = None
+        categoria = (dati.get("categoria") or "").strip().lower()
+        if categoria not in ("legge", "provvedimento"):
+            categoria = None
         tema = (dati.get("tema") or "").strip()[:100] or None
-        return riassunto, rilevanza, tipo_atto, tema
+        return riassunto, rilevanza, categoria, tema
     except Exception as e:
         logging.error("AI fallita per '%s': %s", titolo[:50], e)
         return None, None, None, None
@@ -97,11 +107,14 @@ def main():
 
     aggiornati = 0
     for art in da_fare:
-        riassunto, rilevanza, tipo_atto, tema = classifica(art['titolo'] or "", art['preview'] or "")
-        # Fallback garantito
-        if not tipo_atto:
-            tf = (art['tipo_fonte'] or 'Ufficiale').lower()
-            tipo_atto = "news" if tf == "editoriale" else "provvedimento"
+        tf = (art['tipo_fonte'] or 'Ufficiale').lower()
+        e_ufficiale = tf != "editoriale"
+        riassunto, rilevanza, categoria, tema = classifica(art['titolo'] or "", art['preview'] or "", e_ufficiale=e_ufficiale)
+        # Regola fonte -> categoria, con fallback garantito (mai vuota)
+        if not e_ufficiale:
+            categoria = "news"
+        elif not categoria:
+            categoria = "provvedimento"
         if not tema:
             tema = art['area'] or "Generale"
         if not rilevanza:
@@ -114,12 +127,12 @@ def main():
                 tipo_atto = %s,
                 tema = %s
             WHERE id = %s
-        """, (riassunto, rilevanza, tipo_atto, tema, art['id']))
+        """, (riassunto, rilevanza, categoria, tema, art['id']))
         conn.commit()
         aggiornati += 1
         if aggiornati % 10 == 0:
             logging.info("Classificati %d/%d...", aggiornati, len(da_fare))
-        time.sleep(0.5)  # gentile coi rate limit di Groq
+        time.sleep(0.5)
 
     cur.close()
     conn.close()
