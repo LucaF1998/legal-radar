@@ -33,11 +33,16 @@ def classifica(titolo: str, preview: str, e_ufficiale: bool = True) -> Tuple[Opt
     api_url = "https://api.groq.com/openai/v1/chat/completions"
     headers = {"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"}
     if e_ufficiale:
-        regola_cat = '"categoria": "<legge|provvedimento>", '
+        regola_cat = '"categoria": "<legge|provvedimento|sentenza>", '
         spiega_cat = (
-            "- categoria: \"legge\" SOLO per testi normativi (legge, decreto legge, decreto legislativo, "
-            "regolamento UE, direttiva, testo unico, codice); \"provvedimento\" per ogni altro atto di autorità "
-            "(sanzioni, ordinanze, delibere, linee guida, pareri, comunicazioni). Nel dubbio scegli \"provvedimento\".\n"
+            "- categoria, in base all'organo emanante:\n"
+            "  * \"legge\" = testi normativi (legge, decreto legge/legislativo/ministeriale, regolamento UE, "
+            "direttiva, testo unico, codice), tipicamente Gazzetta Ufficiale/Normattiva/Parlamento/Governo;\n"
+            "  * \"provvedimento\" = atti di autorità amministrative indipendenti (Garante, AGCOM, AGCM, IVASS, "
+            "Consob, Banca d'Italia): sanzioni, ordinanze, delibere, linee guida, pareri;\n"
+            "  * \"sentenza\" = pronunce di organi giurisdizionali (tribunali, Corte d'Assise, Corte Costituzionale, "
+            "TAR, Consiglio di Stato, Cassazione, CGUE, Corte EDU).\n"
+            "  Nel dubbio tra legge e provvedimento scegli \"provvedimento\"; se è una pronuncia di un giudice, \"sentenza\".\n"
         )
     else:
         regola_cat = ""
@@ -77,7 +82,7 @@ def classifica(titolo: str, preview: str, e_ufficiale: bool = True) -> Tuple[Opt
         if rilevanza not in ("alta", "media"):
             rilevanza = None
         categoria = (dati.get("categoria") or "").strip().lower()
-        if categoria not in ("legge", "provvedimento"):
+        if categoria not in ("legge", "provvedimento", "sentenza"):
             categoria = None
         tema = (dati.get("tema") or "").strip()[:100] or None
         return riassunto, rilevanza, categoria, tema
@@ -94,12 +99,13 @@ def main():
     conn = psycopg2.connect(DB_URL)
     cur = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
 
-    # Articoli da classificare: quelli senza tipo_atto. Porto anche il tipo_fonte per il fallback.
+    # Da classificare: articoli senza categoria, OPPURE editoriali classificati male (non-news).
     cur.execute("""
         SELECT a.id, a.titolo, a.preview, a.area, src.tipo_fonte
         FROM articles a
         LEFT JOIN sources src ON src.nome = a.fonte
         WHERE a.tipo_atto IS NULL
+           OR (LOWER(COALESCE(src.tipo_fonte,'')) = 'editoriale' AND a.tipo_atto <> 'news')
         ORDER BY a.id ASC
     """)
     da_fare = cur.fetchall()
