@@ -242,6 +242,13 @@ class LegalRadarDB:
         with self.get_cursor() as cur:
             cur.execute("DELETE FROM sources WHERE id = %s", (fonte_id,))
 
+    def imposta_tipo_fonte(self, fonte_id: int, tipo_fonte: str) -> None:
+        """Aggiorna il tipo di una fonte (Ufficiale/Editoriale)."""
+        if tipo_fonte not in ("Ufficiale", "Editoriale"):
+            return
+        with self.get_cursor() as cur:
+            cur.execute("UPDATE sources SET tipo_fonte = %s WHERE id = %s", (tipo_fonte, fonte_id))
+
     def reset_archivio(self) -> int:
         """Azzera l'archivio: articoli + bookmark + stato letto. Riparte da t0 (ID da 1).
         NON tocca utenti, fonti né preferenze. Ritorna il numero di articoli rimossi."""
@@ -341,18 +348,18 @@ class LegalRadarDB:
         rispettando le fonti spente dall'utente e portando stato letto + tipo fonte."""
         query = """
             SELECT a.*, COALESCE(uas.letto, FALSE) AS letto, src.tipo_fonte,
-                   COALESCE(
-                       a.tipo_atto,
-                       CASE WHEN LOWER(COALESCE(src.tipo_fonte,'')) = 'editoriale' THEN 'news' ELSE 'provvedimento' END
-                   ) AS tipo_atto_eff
+                   CASE
+                       WHEN LOWER(COALESCE(src.tipo_fonte,'')) = 'editoriale' THEN 'news'
+                       ELSE COALESCE(a.tipo_atto, 'provvedimento')
+                   END AS tipo_atto_eff
             FROM articles a
             LEFT JOIN user_article_status uas
                 ON uas.article_id = a.id AND uas.user_id = %s
             LEFT JOIN sources src ON src.nome = a.fonte
-            WHERE COALESCE(
-                      a.tipo_atto,
-                      CASE WHEN LOWER(COALESCE(src.tipo_fonte,'')) = 'editoriale' THEN 'news' ELSE 'provvedimento' END
-                  ) = %s
+            WHERE CASE
+                      WHEN LOWER(COALESCE(src.tipo_fonte,'')) = 'editoriale' THEN 'news'
+                      ELSE COALESCE(a.tipo_atto, 'provvedimento')
+                  END = %s
             AND a.fonte NOT IN (
                 SELECT s.nome FROM sources s
                 JOIN user_source_preferences usp ON s.id = usp.source_id
@@ -583,14 +590,15 @@ if not DB_URL:
     st.stop()
 
 DEFAULT_FONTI = [
-    {"nome": "Agenzia Entrate", "url": "https://www.agenziaentrate.gov.it/portale/web/guest/rss/novita", "area": "Diritto Tributario", "macro": "Leggi & Normativa", "tipo_fonte": "Ufficiale", "tipo_ingestion": "rss"},
-    {"nome": "Garante Privacy", "url": "https://www.garanteprivacy.it/o/gpdp-rss/rss?c=10490", "area": "Privacy", "macro": "Provvedimenti & Sentenze", "tipo_fonte": "Autorità", "tipo_ingestion": "rss"},
-    {"nome": "EDPB Europa", "url": "https://edpb.europa.eu/rss.xml", "area": "Privacy", "macro": "Provvedimenti & Sentenze", "tipo_fonte": "Autorità", "tipo_ingestion": "rss"},
-    {"nome": "Banca d'Italia", "url": "https://www.bancaditalia.it/rss/media.xml", "area": "Diritto Bancario", "macro": "Provvedimenti & Sentenze", "tipo_fonte": "Autorità", "tipo_ingestion": "rss"},
-    {"nome": "Consob", "url": "https://www.consob.it/web/area-pubblica/rss", "area": "Diritto Bancario", "macro": "Provvedimenti & Sentenze", "tipo_fonte": "Autorità", "tipo_ingestion": "rss"},
-    {"nome": "IVASS", "url": "https://www.ivass.it/util/index.rss.html?lingua=it", "area": "Diritto assicurativo", "macro": "Leggi & Normativa", "tipo_fonte": "Autorità", "tipo_ingestion": "rss"},
-    {"nome": "CGUE", "url": "https://curia.europa.eu/site/rss.jsp?lang=it&secondLang=en", "area": "Giurisprudenza UE", "macro": "Provvedimenti & Sentenze", "tipo_fonte": "Ufficiale", "tipo_ingestion": "rss"},
-    {"nome": "Altalex", "url": "https://www.altalex.com/rss", "area": "Legale Generale", "macro": "News & Aggiornamenti", "tipo_fonte": "Editoriale", "tipo_ingestion": "rss"}
+    {"nome": "Agenzia Entrate", "url": "https://www.agenziaentrate.gov.it/portale/web/guest/rss/novita", "area": "Generale", "macro": "Leggi & Normativa", "tipo_fonte": "Ufficiale", "tipo_ingestion": "rss"},
+    {"nome": "Garante Privacy", "url": "https://www.garanteprivacy.it/o/gpdp-rss/rss?c=10490", "area": "Generale", "macro": "Provvedimenti & Sentenze", "tipo_fonte": "Ufficiale", "tipo_ingestion": "rss"},
+    {"nome": "EDPB Europa", "url": "https://edpb.europa.eu/rss.xml", "area": "Generale", "macro": "Provvedimenti & Sentenze", "tipo_fonte": "Ufficiale", "tipo_ingestion": "rss"},
+    {"nome": "Banca d'Italia", "url": "https://www.bancaditalia.it/rss/media.xml", "area": "Generale", "macro": "Provvedimenti & Sentenze", "tipo_fonte": "Ufficiale", "tipo_ingestion": "rss"},
+    {"nome": "Consob", "url": "https://www.consob.it/web/area-pubblica/rss", "area": "Generale", "macro": "Provvedimenti & Sentenze", "tipo_fonte": "Ufficiale", "tipo_ingestion": "rss"},
+    {"nome": "IVASS", "url": "https://www.ivass.it/util/index.rss.html?lingua=it", "area": "Generale", "macro": "Leggi & Normativa", "tipo_fonte": "Ufficiale", "tipo_ingestion": "rss"},
+    {"nome": "CGUE", "url": "https://curia.europa.eu/site/rss.jsp?lang=it&secondLang=en", "area": "Generale", "macro": "Provvedimenti & Sentenze", "tipo_fonte": "Ufficiale", "tipo_ingestion": "rss"},
+    {"nome": "Altalex", "url": "https://www.altalex.com/rss", "area": "Generale", "macro": "News & Aggiornamenti", "tipo_fonte": "Editoriale", "tipo_ingestion": "rss"},
+    {"nome": "Cybersecurity360", "url": "https://www.cybersecurity360.it/feed/", "area": "Generale", "macro": "News & Aggiornamenti", "tipo_fonte": "Editoriale", "tipo_ingestion": "rss"}
 ]
 
 # --- ISTANZA DB CACHATA: init_db() e seeding fonti girano UNA SOLA VOLTA per deploy ---
@@ -674,15 +682,18 @@ st.markdown("""
         --c-provv:#1b3a5b; --c-provv-soft:#e8eef4;
         --c-sent:#5b3a82; --c-sent-soft:#efe9f5;
         --c-news:#1f6b4f; --c-news-soft:#e6f1ea;
+        --c-legge:#8a5a14; --c-legge-soft:#f5ead6;
     }
     .kicker{display:inline-flex; align-items:center; gap:6px; font-size:11px; font-weight:700; letter-spacing:1px; text-transform:uppercase; padding:4px 10px; border-radius:4px;}
     .k-provv{background:var(--c-provv-soft); color:var(--c-provv);}
     .k-sent{background:var(--c-sent-soft); color:var(--c-sent);}
     .k-news{background:var(--c-news-soft); color:var(--c-news);}
+    .k-legge{background:var(--c-legge-soft); color:var(--c-legge);}
     .thumb{height:150px; border-radius:8px; position:relative; overflow:hidden; display:flex; align-items:center; justify-content:center; margin-bottom:0;}
     .thumb-provv{background:linear-gradient(135deg,#1b3a5b,#2d567f);}
     .thumb-sent{background:linear-gradient(135deg,#5b3a82,#7d56a8);}
     .thumb-news{background:linear-gradient(135deg,#1f6b4f,#2f8a68);}
+    .thumb-legge{background:linear-gradient(135deg,#8a5a14,#b07a2d);}
     .thumb .glyph{font-family:'Fraunces',serif; font-size:54px; color:rgba(255,255,255,.92); font-weight:600;}
     .thumb .src-chip{position:absolute; bottom:10px; left:10px; background:rgba(255,255,255,.92); color:var(--ink); font-size:10px; font-weight:700; padding:3px 8px; border-radius:3px; text-transform:uppercase; letter-spacing:.4px;}
     .thumb-lead{height:200px;}
@@ -776,17 +787,19 @@ def genera_microriassunto_groq(titolo: str, preview: str, e_ufficiale: bool = Tr
 
     if e_ufficiale:
         regola_categoria = (
-            '"categoria": "<legge|provvedimento>", '
+            '"categoria": "<legge|provvedimento|sentenza>", '
         )
         spiega_categoria = (
-            "- categoria: \"legge\" SOLO per testi normativi veri e propri (legge, decreto legge, "
-            "decreto legislativo, regolamento UE, direttiva, testo unico, codice); "
-            "\"provvedimento\" per ogni altro atto di autorità (sanzioni, ordinanze, delibere, "
-            "linee guida, pareri, provvedimenti del Garante/IVASS/Consob, comunicazioni). "
-            "Nel dubbio tra i due, scegli \"provvedimento\".\n"
+            "- categoria: classifica in base all'organo che ha emanato l'atto:\n"
+            "  * \"legge\" = testi normativi (legge, decreto legge, decreto legislativo, decreto ministeriale, "
+            "regolamento UE, direttiva, testo unico, codice), tipicamente da Gazzetta Ufficiale, Normattiva, Parlamento, Governo;\n"
+            "  * \"provvedimento\" = atti di AUTORITÀ AMMINISTRATIVE indipendenti (Garante Privacy, AGCOM, AGCM, "
+            "IVASS, Consob, Banca d'Italia): sanzioni, ordinanze, delibere, linee guida, pareri, comunicazioni;\n"
+            "  * \"sentenza\" = pronunce di ORGANI GIURISDIZIONALI (tribunali, Corte d'Assise, Corte Costituzionale, "
+            "TAR, Consiglio di Stato, Corte di Cassazione, CGUE, Corte EDU): sentenze, ordinanze giurisdizionali, decreti del giudice.\n"
+            "  Nel dubbio tra legge e provvedimento scegli \"provvedimento\"; se è chiaramente una pronuncia di un giudice, \"sentenza\".\n"
         )
     else:
-        # Per le editoriali non chiediamo la categoria all'AI: sarà 'news' a monte
         regola_categoria = ""
         spiega_categoria = ""
 
@@ -827,7 +840,7 @@ def genera_microriassunto_groq(titolo: str, preview: str, e_ufficiale: bool = Tr
         if rilevanza not in ("alta", "media"):
             rilevanza = None
         categoria = (dati.get("categoria") or "").strip().lower()
-        if categoria not in ("legge", "provvedimento"):
+        if categoria not in ("legge", "provvedimento", "sentenza"):
             categoria = None
         tema = (dati.get("tema") or "").strip()[:100] or None
         return {"riassunto": riassunto, "rilevanza": rilevanza, "categoria": categoria, "tema": tema}
@@ -961,6 +974,7 @@ with st.sidebar:
         "🏠 Dashboard",
         "📖 Leggi",
         "🏛️ Provvedimenti",
+        "⚖️ Sentenze",
         "📰 News",
         "🔖 I Miei Salvati",
         "⚙️ Gestione Fonti"
@@ -1070,10 +1084,12 @@ def _stile_categoria(tipo_atto: Optional[str]) -> Dict[str, str]:
     """Ritorna classe CSS, glifo ed etichetta per il trattamento grafico per categoria."""
     t = (tipo_atto or "provvedimento").lower()
     if t == "legge":
-        return {"cls": "sent", "glyph": "§", "label": "Legge"}
+        return {"cls": "legge", "glyph": "§", "label": "Legge"}
+    if t == "sentenza":
+        return {"cls": "sent", "glyph": "⚖", "label": "Sentenza"}
     if t == "news":
         return {"cls": "news", "glyph": "▤", "label": "News"}
-    return {"cls": "provv", "glyph": "⚖", "label": "Provvedimento"}
+    return {"cls": "provv", "glyph": "▣", "label": "Provvedimento"}
 
 def _pp_card(art: Dict, lead: bool = False) -> str:
     """Costruisce l'HTML di una card della prima pagina (apertura o griglia)."""
@@ -1182,9 +1198,9 @@ if pagina_pulita == "🏠 Dashboard":
                     lk = html.escape(str(art.get('link') or ''), quote=True)
                     st.markdown(f'<div class="mini"><div class="mm">{mm}</div><a href="{lk}" target="_blank">{tt}</a></div>', unsafe_allow_html=True)
 
-elif pagina_pulita in ["📖 Leggi", "🏛️ Provvedimenti", "📰 News"]:
+elif pagina_pulita in ["📖 Leggi", "🏛️ Provvedimenti", "⚖️ Sentenze", "📰 News"]:
     # Mappa la voce di menu alla categoria
-    mappa_tipo = {"📖 Leggi": "legge", "🏛️ Provvedimenti": "provvedimento", "📰 News": "news"}
+    mappa_tipo = {"📖 Leggi": "legge", "🏛️ Provvedimenti": "provvedimento", "⚖️ Sentenze": "sentenza", "📰 News": "news"}
     tipo_atto = mappa_tipo[pagina_pulita]
     etichetta = pagina_pulita.split(" ", 1)[1]
 
@@ -1240,12 +1256,12 @@ elif pagina_pulita == "⚙️ Gestione Fonti":
     fonti_personali = db.carica_fonti_con_preferenze(st.session_state.user['id'])
     for f in fonti_personali:
         col_info, col_toggle = st.columns([4, 1])
-        tipo_f = f.get('tipo_fonte', 'Ufficiale')
-        tipo_i = f.get('tipo_ingestion', 'rss')
-        emoji_tipo = {"Ufficiale": "🏛️", "Autorità": "⚖️", "Editoriale": "📰"}.get(tipo_f, "📄")
+        # Normalizzo: tutto ciò che non è 'Editoriale' è trattato come 'Ufficiale'
+        tipo_f = "Editoriale" if (f.get('tipo_fonte') or '').lower() == "editoriale" else "Ufficiale"
+        emoji_tipo = "📰" if tipo_f == "Editoriale" else "🏛️"
         col_info.markdown(
-            f"**{html.escape(str(f['nome']))}** {emoji_tipo} <span style='font-size:11px;color:#888;'>({tipo_f} · {tipo_i})</span><br>"
-            f"<span style='font-size:13px;color:#555;'>{html.escape(str(f['area']))} — {html.escape(str(f['macro']))}</span>",
+            f"**{html.escape(str(f['nome']))}** {emoji_tipo} "
+            f"<span style='font-size:12px;color:#888;'>· {tipo_f}</span>",
             unsafe_allow_html=True
         )
         
@@ -1259,48 +1275,61 @@ elif pagina_pulita == "⚙️ Gestione Fonti":
     
     # SEZIONE 2 - AGGIUNTA GLOBALE (Per tutti)
     st.subheader("➕ Aggiungi Nuova Fonte (Globale)")
-    st.caption("Il tipo di fonte determina la classificazione: Ufficiale/Autorità producono Leggi e Provvedimenti "
-               "(distinti dall'AI), le Editoriali producono News.")
+    st.caption("Indica solo il tipo di fonte. La categoria (Leggi / Provvedimenti / Sentenze) e il tema "
+               "sono determinati automaticamente dall'AI. Le fonti Editoriali producono sempre News.")
     with st.form("form_aggiunta_fonte", clear_on_submit=True):
         c1, c2 = st.columns(2)
-        n_nome = c1.text_input("Nome Autorità / Sito")
-        n_url = c1.text_input("URL Feed RSS / Pagina")
-        n_tipo_fonte = c1.selectbox("Tipo di fonte", ["Ufficiale", "Autorità", "Editoriale"],
-                                    help="Ufficiale/Autorità → gli articoli saranno classificati come Leggi o Provvedimenti. "
-                                         "Editoriale → gli articoli saranno classificati come News.")
-        n_area = c2.text_input("Materia Giuridica (es. Compliance, Privacy)")
+        n_nome = c1.text_input("Nome della fonte")
+        n_url = c1.text_input("URL Feed RSS")
+        n_tipo_fonte = c2.selectbox("Tipo di fonte", ["Ufficiale", "Editoriale"],
+                                    help="Ufficiale → fonti del diritto (Gazzetta Ufficiale, autorità, tribunali): "
+                                         "gli articoli diventano Leggi, Provvedimenti o Sentenze. "
+                                         "Editoriale → testate e portali (Altalex, Cybersecurity360): diventano News.")
         n_tipo_ingestion = c2.selectbox("Modalità di acquisizione", ["rss", "scraper"],
                                         help="'rss' per feed standard. 'scraper' richiede un parser dedicato (avanzato).")
-        # Il campo macro è legacy: la categoria reale è derivata da tipo_fonte + AI. Default neutro.
-        n_macro = "Provvedimenti & Sentenze" if n_tipo_fonte != "Editoriale" else "News & Aggiornamenti"
+        # Campi legacy mantenuti nel DB con valori neutri (non più gestiti dall'utente)
+        n_area = "Generale"
+        n_macro = "News & Aggiornamenti" if n_tipo_fonte == "Editoriale" else "Provvedimenti & Sentenze"
         if st.form_submit_button("➕ Salva Fonte nel Database Comune"):
-            if n_nome and n_url and n_area:
+            if n_nome and n_url:
                 if db.aggiungi_fonte(n_nome, n_url, n_area, n_macro, n_tipo_fonte, n_tipo_ingestion):
                     st.success(f"Fonte '{n_nome}' registrata nel database globale!")
                     st.rerun()
                 else:
                     st.error("Errore. URL probabilmente già registrato.")
             else:
-                st.error("Compila tutti i campi.")
+                st.error("Compila nome e URL.")
                 
     st.divider()
     
-    # SEZIONE 3 - ELIMINAZIONE GLOBALE (riservata agli admin)
+    # SEZIONE 3 - GESTIONE CATALOGO GLOBALE (riservata agli admin)
     is_admin = st.session_state.user.get('role', 'user') == 'admin'
-    st.subheader("🗑️ Database Globale Fonti")
+    st.subheader("🗂️ Database Globale Fonti")
     if is_admin:
-        st.caption("Come admin puoi eliminare le fonti dal catalogo comune. L'azione vale per tutti gli utenti.")
+        st.caption("Come admin puoi cambiare il tipo di ogni fonte (Ufficiale/Editoriale) ed eliminarle. "
+                   "Le modifiche valgono per tutti gli utenti.")
     else:
-        st.caption("Elenco delle fonti del catalogo comune. L'eliminazione è riservata agli amministratori.")
+        st.caption("Elenco delle fonti del catalogo comune. La gestione è riservata agli amministratori.")
     for f in fonti_personali:
-        col_t, col_b = st.columns([5, 1])
-        col_t.markdown(f"**{html.escape(str(f['nome']))}** - <span style='font-size:12px;color:#888;'>{html.escape(str(f['url']))}</span>", unsafe_allow_html=True)
+        tipo_corrente = "Editoriale" if (f.get('tipo_fonte') or '').lower() == "editoriale" else "Ufficiale"
         if is_admin:
+            col_t, col_tipo, col_b = st.columns([3, 1.4, 1])
+            col_t.markdown(f"**{html.escape(str(f['nome']))}**<br><span style='font-size:11px;color:#888;'>{html.escape(str(f['url']))}</span>", unsafe_allow_html=True)
+            nuovo_tipo = col_tipo.selectbox(
+                "Tipo", ["Ufficiale", "Editoriale"],
+                index=0 if tipo_corrente == "Ufficiale" else 1,
+                key=f"tipo_{f['id']}", label_visibility="collapsed"
+            )
+            if nuovo_tipo != tipo_corrente:
+                db.imposta_tipo_fonte(f['id'], nuovo_tipo)
+                st.rerun()
             if col_b.button("Elimina", key=f"del_src_{f['id']}"):
                 db.rimuovi_fonte(f['id'])
                 st.success("Fonte rimossa dal sistema.")
                 st.rerun()
         else:
+            col_t, col_b = st.columns([5, 1])
+            col_t.markdown(f"**{html.escape(str(f['nome']))}** <span style='font-size:11px;color:#888;'>· {tipo_corrente}</span>", unsafe_allow_html=True)
             col_b.caption("🔒")
         st.write("---")
 
