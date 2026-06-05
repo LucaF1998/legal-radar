@@ -761,10 +761,11 @@ def genera_sintesi_groq(url: str, preview_text: str) -> str:
         return f"⚠️ Errore AI ({r.status_code})"
     except: return "⚠️ Connessione AI fallita."
 
-def genera_microriassunto_groq(titolo: str, preview: str) -> Dict[str, Optional[str]]:
-    """Genera micro-riassunto + rilevanza + tipo_atto + tema, via Groq (JSON). Usato all'ingestion.
-    Ritorna {'riassunto','rilevanza','tipo_atto','tema'}. Fail-safe: None su errore."""
-    vuoto = {"riassunto": None, "rilevanza": None, "tipo_atto": None, "tema": None}
+def genera_microriassunto_groq(titolo: str, preview: str, e_ufficiale: bool = True) -> Dict[str, Optional[str]]:
+    """Genera riassunto + rilevanza + (per fonti ufficiali) categoria legge/provvedimento + tema.
+    Ritorna {'riassunto','rilevanza','categoria','tema'}. Fail-safe: None su errore.
+    Nota: per le fonti editoriali la categoria è imposta a 'news' a monte (l'AI non la decide)."""
+    vuoto = {"riassunto": None, "rilevanza": None, "categoria": None, "tema": None}
     raw_key = st.secrets.get("GROQ_API_KEY", "").strip()
     if not raw_key.startswith("gsk_"):
         return vuoto
@@ -772,20 +773,35 @@ def genera_microriassunto_groq(titolo: str, preview: str) -> Dict[str, Optional[
     testo = f"Titolo: {titolo}\n\nAnteprima: {preview}"
     api_url = "https://api.groq.com/openai/v1/chat/completions"
     headers = {"Authorization": f"Bearer {raw_key}", "Content-Type": "application/json"}
+
+    if e_ufficiale:
+        regola_categoria = (
+            '"categoria": "<legge|provvedimento>", '
+        )
+        spiega_categoria = (
+            "- categoria: \"legge\" SOLO per testi normativi veri e propri (legge, decreto legge, "
+            "decreto legislativo, regolamento UE, direttiva, testo unico, codice); "
+            "\"provvedimento\" per ogni altro atto di autorità (sanzioni, ordinanze, delibere, "
+            "linee guida, pareri, provvedimenti del Garante/IVASS/Consob, comunicazioni). "
+            "Nel dubbio tra i due, scegli \"provvedimento\".\n"
+        )
+    else:
+        # Per le editoriali non chiediamo la categoria all'AI: sarà 'news' a monte
+        regola_categoria = ""
+        spiega_categoria = ""
+
     system_prompt = (
         "Sei un assistente legale che pre-analizza novità normative, giurisprudenziali e di settore per un team "
         "di compliance specializzato nei comparatori online italiani (finanza, assicurazioni, utility). "
         "Dato titolo e anteprima, rispondi ESCLUSIVAMENTE con un oggetto JSON valido, senza testo prima o dopo:\n"
         '{"riassunto": "<1-2 frasi in italiano, chiare e concrete>", '
         '"rilevanza": "<alta|media>", '
-        '"tipo_atto": "<sentenza|provvedimento|news>", '
+        + regola_categoria +
         '"tema": "<tema giuridico principale>"}\n\n'
         "Regole:\n"
         "- rilevanza: \"alta\" se impatta direttamente i comparatori (sanzioni, telemarketing, consenso, "
         "trasparenza tariffaria, data breach, intermediazione); \"media\" altrimenti.\n"
-        "- tipo_atto: \"sentenza\" per pronunce giurisdizionali (Corti, tribunali, CGUE); "
-        "\"provvedimento\" per atti di autorità/regolatori (Garante, IVASS, Consob, delibere, linee guida, ordinanze); "
-        "\"news\" per articoli giornalistici/editoriali e comunicati divulgativi.\n"
+        + spiega_categoria +
         "- tema: il tema giuridico principale. Usa preferibilmente uno tra: Privacy, Cybersecurity, "
         "Assicurativo, Bancario e finanziario, Tributario, Consumatori e pratiche commerciali, Concorrenza, "
         "Intelligenza artificiale. Se nessuno calza, indica tu il tema più appropriato in 1-3 parole.\n"
@@ -810,45 +826,50 @@ def genera_microriassunto_groq(titolo: str, preview: str) -> Dict[str, Optional[
         rilevanza = (dati.get("rilevanza") or "").strip().lower()
         if rilevanza not in ("alta", "media"):
             rilevanza = None
-        tipo_atto = (dati.get("tipo_atto") or "").strip().lower()
-        if tipo_atto not in ("sentenza", "provvedimento", "news"):
-            tipo_atto = None
+        categoria = (dati.get("categoria") or "").strip().lower()
+        if categoria not in ("legge", "provvedimento"):
+            categoria = None
         tema = (dati.get("tema") or "").strip()[:100] or None
-        return {"riassunto": riassunto, "rilevanza": rilevanza, "tipo_atto": tipo_atto, "tema": tema}
+        return {"riassunto": riassunto, "rilevanza": rilevanza, "categoria": categoria, "tema": tema}
     except Exception as e:
         logging.error("Microriassunto fallito: %s", e)
         return vuoto
 
 def _classifica_con_fallback(meta: Dict, fonte: Dict) -> Dict:
-    """Garantisce che tipo_atto e tema non siano MAI vuoti.
-    Se l'AI non ha classificato, deduce dal tipo della fonte e dall'area."""
-    tipo_atto = meta.get("tipo_atto")
-    if not tipo_atto:
-        # Fallback deterministico dal tipo fonte: editoriale -> news, autorità/ufficiale -> provvedimento
-        tf = (fonte.get('tipo_fonte') or 'Ufficiale').lower()
-        tipo_atto = "news" if tf == "editoriale" else "provvedimento"
+    """Determina la categoria finale (legge/provvedimento/news) combinando regola-fonte e AI.
+    - Fonte editoriale -> sempre 'news'.
+    - Fonte ufficiale/autorità -> 'legge' o 'provvedimento' dall'AI, con fallback 'provvedimento'.
+    Garantisce categoria e tema mai vuoti."""
+    tf = (fonte.get('tipo_fonte') or 'Ufficiale').lower()
+    if tf == "editoriale":
+        categoria = "news"
+    else:
+        categoria = meta.get("categoria") or "provvedimento"  # fallback sicuro per atti ufficiali
     tema = meta.get("tema") or fonte.get('area') or "Generale"
     return {
         "riassunto": meta.get("riassunto"),
         "rilevanza": meta.get("rilevanza") or "media",
-        "tipo_atto": tipo_atto,
+        "categoria": categoria,
         "tema": tema,
     }
 
 def _ingest_rss(f: Dict) -> List[Dict]:
     """Strategia di ingestion per fonti con feed RSS."""
     risultati = []
+    e_ufficiale = (f.get('tipo_fonte') or 'Ufficiale').lower() != "editoriale"
     feed = feedparser.parse(f['url'])
     for entry in feed.entries[:5]:
         sommario = entry.summary if hasattr(entry, 'summary') else ""
         preview = BeautifulSoup(sommario, "html.parser").get_text()[:250] + "..."
-        # Pre-analisi AI + fallback garantito (tipo_atto e tema mai vuoti)
-        meta = _classifica_con_fallback(genera_microriassunto_groq(entry.title, preview), f)
+        # Per le editoriali non chiediamo all'AI la categoria (sarà 'news'); per le ufficiali sì
+        meta = _classifica_con_fallback(
+            genera_microriassunto_groq(entry.title, preview, e_ufficiale=e_ufficiale), f
+        )
         risultati.append({
             "Titolo": entry.title, "Link": entry.link, "Preview": preview,
             "Macro": f['macro'], "Area": f['area'], "Fonte": f['nome'],
             "RiassuntoAI": meta["riassunto"], "Rilevanza": meta["rilevanza"],
-            "TipoAtto": meta["tipo_atto"], "Tema": meta["tema"]
+            "TipoAtto": meta["categoria"], "Tema": meta["tema"]
         })
     return risultati
 
@@ -938,8 +959,8 @@ with st.sidebar:
 
     opzioni_nav = [
         "🏠 Dashboard",
+        "📖 Leggi",
         "🏛️ Provvedimenti",
-        "⚖️ Sentenze",
         "📰 News",
         "🔖 I Miei Salvati",
         "⚙️ Gestione Fonti"
@@ -1048,11 +1069,11 @@ def mostra_hub_legale(lista_articoli: List[Dict], tipo_bacheca: str):
 def _stile_categoria(tipo_atto: Optional[str]) -> Dict[str, str]:
     """Ritorna classe CSS, glifo ed etichetta per il trattamento grafico per categoria."""
     t = (tipo_atto or "provvedimento").lower()
-    if t == "sentenza":
-        return {"cls": "sent", "glyph": "⚖", "label": "Sentenza"}
+    if t == "legge":
+        return {"cls": "sent", "glyph": "§", "label": "Legge"}
     if t == "news":
         return {"cls": "news", "glyph": "▤", "label": "News"}
-    return {"cls": "provv", "glyph": "§", "label": "Provvedimento"}
+    return {"cls": "provv", "glyph": "⚖", "label": "Provvedimento"}
 
 def _pp_card(art: Dict, lead: bool = False) -> str:
     """Costruisce l'HTML di una card della prima pagina (apertura o griglia)."""
@@ -1161,9 +1182,9 @@ if pagina_pulita == "🏠 Dashboard":
                     lk = html.escape(str(art.get('link') or ''), quote=True)
                     st.markdown(f'<div class="mini"><div class="mm">{mm}</div><a href="{lk}" target="_blank">{tt}</a></div>', unsafe_allow_html=True)
 
-elif pagina_pulita in ["🏛️ Provvedimenti", "⚖️ Sentenze", "📰 News"]:
-    # Mappa la voce di menu alla categoria AI
-    mappa_tipo = {"🏛️ Provvedimenti": "provvedimento", "⚖️ Sentenze": "sentenza", "📰 News": "news"}
+elif pagina_pulita in ["📖 Leggi", "🏛️ Provvedimenti", "📰 News"]:
+    # Mappa la voce di menu alla categoria
+    mappa_tipo = {"📖 Leggi": "legge", "🏛️ Provvedimenti": "provvedimento", "📰 News": "news"}
     tipo_atto = mappa_tipo[pagina_pulita]
     etichetta = pagina_pulita.split(" ", 1)[1]
 
@@ -1238,23 +1259,22 @@ elif pagina_pulita == "⚙️ Gestione Fonti":
     
     # SEZIONE 2 - AGGIUNTA GLOBALE (Per tutti)
     st.subheader("➕ Aggiungi Nuova Fonte (Globale)")
-    st.caption("Le sezioni *Leggi* e *Provvedimenti* sono riservate a fonti Ufficiali e Autorità. "
-               "Le fonti Editoriali sono ammesse solo in *News & Aggiornamenti*.")
+    st.caption("Il tipo di fonte determina la classificazione: Ufficiale/Autorità producono Leggi e Provvedimenti "
+               "(distinti dall'AI), le Editoriali producono News.")
     with st.form("form_aggiunta_fonte", clear_on_submit=True):
         c1, c2 = st.columns(2)
         n_nome = c1.text_input("Nome Autorità / Sito")
         n_url = c1.text_input("URL Feed RSS / Pagina")
-        n_tipo_fonte = c1.selectbox("Tipo di fonte", ["Ufficiale", "Autorità", "Editoriale"])
-        n_macro = c2.selectbox("Categoria Macro", ["Leggi & Normativa", "Provvedimenti & Sentenze", "News & Aggiornamenti"])
+        n_tipo_fonte = c1.selectbox("Tipo di fonte", ["Ufficiale", "Autorità", "Editoriale"],
+                                    help="Ufficiale/Autorità → gli articoli saranno classificati come Leggi o Provvedimenti. "
+                                         "Editoriale → gli articoli saranno classificati come News.")
         n_area = c2.text_input("Materia Giuridica (es. Compliance, Privacy)")
         n_tipo_ingestion = c2.selectbox("Modalità di acquisizione", ["rss", "scraper"],
                                         help="'rss' per feed standard. 'scraper' richiede un parser dedicato (avanzato).")
+        # Il campo macro è legacy: la categoria reale è derivata da tipo_fonte + AI. Default neutro.
+        n_macro = "Provvedimenti & Sentenze" if n_tipo_fonte != "Editoriale" else "News & Aggiornamenti"
         if st.form_submit_button("➕ Salva Fonte nel Database Comune"):
-            # Regola di coerenza: Editoriale ammessa solo in News
-            if n_tipo_fonte == "Editoriale" and n_macro != "News & Aggiornamenti":
-                st.error("Le fonti Editoriali sono ammesse solo nella sezione 'News & Aggiornamenti'. "
-                         "Per Leggi e Provvedimenti usa fonti Ufficiali o Autorità.")
-            elif n_nome and n_url and n_area:
+            if n_nome and n_url and n_area:
                 if db.aggiungi_fonte(n_nome, n_url, n_area, n_macro, n_tipo_fonte, n_tipo_ingestion):
                     st.success(f"Fonte '{n_nome}' registrata nel database globale!")
                     st.rerun()
