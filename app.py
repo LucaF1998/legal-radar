@@ -74,6 +74,7 @@ class LegalRadarDB:
                 area VARCHAR(150),
                 fonte VARCHAR(150),
                 data_scansione TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                data_pubblicazione TIMESTAMP,
                 riassunto_ai TEXT,
                 rilevanza VARCHAR(20),
                 tipo_atto VARCHAR(30),
@@ -122,6 +123,7 @@ class LegalRadarDB:
             "ALTER TABLE articles ADD COLUMN IF NOT EXISTS rilevanza VARCHAR(20)",
             "ALTER TABLE articles ADD COLUMN IF NOT EXISTS tipo_atto VARCHAR(30)",
             "ALTER TABLE articles ADD COLUMN IF NOT EXISTS tema VARCHAR(100)",
+            "ALTER TABLE articles ADD COLUMN IF NOT EXISTS data_pubblicazione TIMESTAMP",
             "CREATE INDEX IF NOT EXISTS idx_articles_tipoatto ON articles(tipo_atto, data_scansione DESC)",
         )
         try:
@@ -296,13 +298,14 @@ class LegalRadarDB:
 
     def salva_articoli_storico(self, articoli_lista: List[Dict]) -> None:
         query = """
-            INSERT INTO articles (titolo, link, preview, macro, area, fonte, riassunto_ai, rilevanza, tipo_atto, tema) 
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s) 
+            INSERT INTO articles (titolo, link, preview, macro, area, fonte, riassunto_ai, rilevanza, tipo_atto, tema, data_pubblicazione) 
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) 
             ON CONFLICT (link) DO NOTHING
         """
         params = [
             (art['Titolo'], art['Link'], art['Preview'], art['Macro'], art['Area'], art['Fonte'],
-             art.get('RiassuntoAI'), art.get('Rilevanza'), art.get('TipoAtto'), art.get('Tema'))
+             art.get('RiassuntoAI'), art.get('Rilevanza'), art.get('TipoAtto'), art.get('Tema'),
+             art.get('DataPubblicazione'))
             for art in articoli_lista
         ]
         with self.get_cursor() as cur:
@@ -336,7 +339,7 @@ class LegalRadarDB:
             query += " AND (a.titolo ILIKE %s OR a.preview ILIKE %s OR a.area ILIKE %s)"
             text_param = f"%{ricerca_testo}%"
             params.extend([text_param, text_param, text_param])
-        query += " ORDER BY a.data_scansione DESC LIMIT 100"
+        query += " ORDER BY COALESCE(a.data_pubblicazione, a.data_scansione) DESC LIMIT 100"
         with self.get_cursor(dict_cursor=True) as cur:
             cur.execute(query, params)
             articoli = cur.fetchall()
@@ -374,7 +377,7 @@ class LegalRadarDB:
             query += " AND (a.titolo ILIKE %s OR a.preview ILIKE %s OR a.area ILIKE %s)"
             text_param = f"%{ricerca_testo}%"
             params.extend([text_param, text_param, text_param])
-        query += " ORDER BY a.data_scansione DESC LIMIT 100"
+        query += " ORDER BY COALESCE(a.data_pubblicazione, a.data_scansione) DESC LIMIT 100"
         with self.get_cursor(dict_cursor=True) as cur:
             cur.execute(query, params)
             articoli = cur.fetchall()
@@ -413,7 +416,7 @@ class LegalRadarDB:
             ORDER BY
                 CASE WHEN a.rilevanza = 'alta' THEN 0 ELSE 1 END,
                 COALESCE(uas.letto, FALSE) ASC,
-                a.data_scansione DESC
+                COALESCE(a.data_pubblicazione, a.data_scansione) DESC
             LIMIT %s
         """
         with self.get_cursor(dict_cursor=True) as cur:
@@ -428,7 +431,7 @@ class LegalRadarDB:
             FROM articles a
             LEFT JOIN sources src ON src.nome = a.fonte
             WHERE {self._filtro_fonti_attive(user_id)}
-            ORDER BY a.data_scansione DESC
+            ORDER BY COALESCE(a.data_pubblicazione, a.data_scansione) DESC
             LIMIT %s
         """
         with self.get_cursor(dict_cursor=True) as cur:
@@ -443,7 +446,7 @@ class LegalRadarDB:
             FROM articles a
             LEFT JOIN sources src ON src.nome = a.fonte
             WHERE a.tema = %s AND {self._filtro_fonti_attive(user_id)}
-            ORDER BY a.data_scansione DESC
+            ORDER BY COALESCE(a.data_pubblicazione, a.data_scansione) DESC
             LIMIT %s
         """
         with self.get_cursor(dict_cursor=True) as cur:
@@ -492,7 +495,7 @@ class LegalRadarDB:
             query += " AND (a.titolo ILIKE %s OR a.preview ILIKE %s)"
             text_param = f"%{ricerca_testo}%"
             params.extend([text_param, text_param])
-        query += " ORDER BY a.data_scansione DESC"
+        query += " ORDER BY COALESCE(a.data_pubblicazione, a.data_scansione) DESC"
         with self.get_cursor(dict_cursor=True) as cur:
             cur.execute(query, params)
             salvati = cur.fetchall()
@@ -866,6 +869,32 @@ def _classifica_con_fallback(meta: Dict, fonte: Dict) -> Dict:
         "tema": tema,
     }
 
+def pulisci_titolo(titolo: str) -> str:
+    """Normalizza i titoli sporchi dei feed istituzionali.
+    Es. CGUE: '78/Thu Jun 04 00:00:00 CEST 2026 : null - Sentenza...' -> 'Sentenza...'"""
+    if not titolo:
+        return titolo
+    t = titolo.strip()
+    # Pattern CGUE: 'NN/<data java> : null - <vero titolo>'
+    m = re.match(r"^\d+/\w{3}\s\w{3}\s\d{1,2}.*?:\s*null\s*-\s*(.+)$", t)
+    if m:
+        t = m.group(1).strip()
+    # Rimuove 'null' isolati residui e spazi multipli
+    t = re.sub(r"\bnull\b\s*-?\s*", "", t).strip()
+    t = re.sub(r"\s{2,}", " ", t)
+    return t or titolo  # se la pulizia svuota tutto, tieni l'originale
+
+def estrai_data_pubblicazione(entry) -> Optional[datetime]:
+    """Estrae la data di pubblicazione reale dal feed RSS, se presente."""
+    for campo in ("published_parsed", "updated_parsed"):
+        st_time = getattr(entry, campo, None)
+        if st_time:
+            try:
+                return datetime(*st_time[:6])
+            except Exception:
+                continue
+    return None
+
 def _ingest_rss(f: Dict) -> List[Dict]:
     """Strategia di ingestion per fonti con feed RSS."""
     risultati = []
@@ -873,16 +902,21 @@ def _ingest_rss(f: Dict) -> List[Dict]:
     feed = feedparser.parse(f['url'])
     for entry in feed.entries[:5]:
         sommario = entry.summary if hasattr(entry, 'summary') else ""
-        preview = BeautifulSoup(sommario, "html.parser").get_text()[:250] + "..."
-        # Per le editoriali non chiediamo all'AI la categoria (sarà 'news'); per le ufficiali sì
+        testo_completo = BeautifulSoup(sommario, "html.parser").get_text().strip()
+        preview = testo_completo[:250] + ("..." if len(testo_completo) > 250 else "")
+        titolo = pulisci_titolo(entry.title)
+        data_pub = estrai_data_pubblicazione(entry)
+        # All'AI passo il testo esteso (fino a 1200 caratteri), non la preview troncata:
+        # più contesto = classificazione e riassunto più precisi, stessa singola chiamata.
         meta = _classifica_con_fallback(
-            genera_microriassunto_groq(entry.title, preview, e_ufficiale=e_ufficiale), f
+            genera_microriassunto_groq(titolo, testo_completo[:1200], e_ufficiale=e_ufficiale), f
         )
         risultati.append({
-            "Titolo": entry.title, "Link": entry.link, "Preview": preview,
+            "Titolo": titolo, "Link": entry.link, "Preview": preview,
             "Macro": f['macro'], "Area": f['area'], "Fonte": f['nome'],
             "RiassuntoAI": meta["riassunto"], "Rilevanza": meta["rilevanza"],
-            "TipoAtto": meta["categoria"], "Tema": meta["tema"]
+            "TipoAtto": meta["categoria"], "Tema": meta["tema"],
+            "DataPubblicazione": data_pub
         })
     return risultati
 
@@ -1010,6 +1044,10 @@ def mostra_hub_legale(lista_articoli: List[Dict], tipo_bacheca: str):
             e_link = html.escape(str(art.get('link') or ''), quote=True)
             rango = art.get('tipo_fonte')
             tag_rango = f'<span class="meta-tag tag-rango">{html.escape(str(rango))}</span>' if rango else ''
+            # Data dell'atto: la pubblicazione reale se disponibile, altrimenti la scansione
+            data_rif = art.get('data_pubblicazione') or art.get('data_scansione')
+            data_str = data_rif.strftime('%d/%m/%Y') if data_rif else ''
+            tag_data = f'<span class="meta-tag tag-rango">📅 {data_str}</span>' if data_str else ''
             # Tag tema (dall'AI): se assente, ripiega sull'area manuale
             tema = art.get('tema') or art.get('area')
             tag_tema = f'<span class="meta-tag tag-area">{html.escape(str(tema))}</span>' if tema else ''
@@ -1027,7 +1065,7 @@ def mostra_hub_legale(lista_articoli: List[Dict], tipo_bacheca: str):
             card_html = (
                 f'<div class="{classe_card}">'
                 f'<div>{tag_tema}'
-                f'<span class="meta-tag tag-fonte">{e_fonte}</span>{tag_rango}{badge_ril}</div>'
+                f'<span class="meta-tag tag-fonte">{e_fonte}</span>{tag_rango}{tag_data}{badge_ril}</div>'
                 f'<a href="{e_link}" target="_blank" class="card-title">{e_titolo}{badge_nuovo}</a>'
                 f'{blocco_riassunto}'
                 f'<div class="card-preview">{e_preview}</div>'
