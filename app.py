@@ -346,7 +346,7 @@ class LegalRadarDB:
         return [dict(a) for a in articoli]
 
     def estrai_per_tipo_atto(self, tipo_atto: str, user_id: int, ricerca_testo: str = "",
-                             tema: Optional[str] = None) -> List[Dict]:
+                             tema: Optional[str] = None, limite: int = 100) -> List[Dict]:
         """Estrae articoli per categoria AI (sentenza/provvedimento/news), con filtro tema opzionale,
         rispettando le fonti spente dall'utente e portando stato letto + tipo fonte."""
         query = """
@@ -377,7 +377,8 @@ class LegalRadarDB:
             query += " AND (a.titolo ILIKE %s OR a.preview ILIKE %s OR a.area ILIKE %s)"
             text_param = f"%{ricerca_testo}%"
             params.extend([text_param, text_param, text_param])
-        query += " ORDER BY COALESCE(a.data_pubblicazione, a.data_scansione) DESC LIMIT 100"
+        query += " ORDER BY COALESCE(a.data_pubblicazione, a.data_scansione) DESC LIMIT %s"
+        params.append(limite)
         with self.get_cursor(dict_cursor=True) as cur:
             cur.execute(query, params)
             articoli = cur.fetchall()
@@ -1258,8 +1259,32 @@ elif pagina_pulita in ["📖 Leggi", "🏛️ Provvedimenti", "⚖️ Sentenze",
         if scelta_tema != "Tutti i temi":
             tema_sel = scelta_tema
 
-    dati_db = db.estrai_per_tipo_atto(tipo_atto, st.session_state.user['id'], ricerca_testo=ricerca, tema=tema_sel)
-    mostra_hub_legale(dati_db, tipo_bacheca="radar")
+    # --- PAGINAZIONE "CARICA ALTRI" ---
+    PAGINA_DIM = 25
+    if 'paginazione' not in st.session_state:
+        st.session_state.paginazione = {}
+    # La chiave di contesto include sezione + filtri: se cambiano, il contatore riparte
+    ctx_key = f"{tipo_atto}|{tema_sel or ''}|{ricerca or ''}"
+    stato_pag = st.session_state.paginazione
+    if stato_pag.get('ctx') != ctx_key:
+        stato_pag['ctx'] = ctx_key
+        stato_pag['n'] = PAGINA_DIM
+    limite_corrente = stato_pag['n']
+
+    # Chiedo un articolo in più del necessario: se arriva, esiste un'altra pagina
+    dati_db = db.estrai_per_tipo_atto(
+        tipo_atto, st.session_state.user['id'],
+        ricerca_testo=ricerca, tema=tema_sel, limite=limite_corrente + 1
+    )
+    ci_sono_altri = len(dati_db) > limite_corrente
+    mostra_hub_legale(dati_db[:limite_corrente], tipo_bacheca="radar")
+
+    if ci_sono_altri:
+        if st.button(f"⬇️ Carica altri {PAGINA_DIM}", key=f"more_{tipo_atto}", use_container_width=True):
+            stato_pag['n'] += PAGINA_DIM
+            st.rerun()
+    elif limite_corrente > PAGINA_DIM:
+        st.caption("Hai raggiunto la fine dell'archivio per questi filtri.")
 
 elif pagina_pulita == "🔖 I Miei Salvati":
     st.header("I Miei Articoli Salvati")
