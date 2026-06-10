@@ -1,7 +1,9 @@
 import os
+import re
 import sys
 import json
 import logging
+from datetime import datetime
 from typing import List, Tuple, Dict, Optional
 
 import psycopg2
@@ -17,6 +19,31 @@ logging.basicConfig(
 )
 
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "").strip()
+
+
+def pulisci_titolo(titolo: str) -> str:
+    """Normalizza i titoli sporchi dei feed istituzionali (es. CGUE)."""
+    if not titolo:
+        return titolo
+    t = titolo.strip()
+    m = re.match(r"^\d+/\w{3}\s\w{3}\s\d{1,2}.*?:\s*null\s*-\s*(.+)$", t)
+    if m:
+        t = m.group(1).strip()
+    t = re.sub(r"\bnull\b\s*-?\s*", "", t).strip()
+    t = re.sub(r"\s{2,}", " ", t)
+    return t or titolo
+
+
+def estrai_data_pubblicazione(entry) -> Optional[datetime]:
+    """Estrae la data di pubblicazione reale dal feed RSS, se presente."""
+    for campo in ("published_parsed", "updated_parsed"):
+        st_time = getattr(entry, campo, None)
+        if st_time:
+            try:
+                return datetime(*st_time[:6])
+            except Exception:
+                continue
+    return None
 
 
 def genera_microriassunto(titolo: str, preview: str, e_ufficiale: bool = True) -> Tuple[Optional[str], Optional[str], Optional[str], Optional[str]]:
@@ -98,8 +125,12 @@ def _ingest_rss(f: Dict) -> List[Tuple]:
     feed = feedparser.parse(f['url'])
     for entry in feed.entries[:10]:
         sommario = entry.summary if hasattr(entry, 'summary') else ""
-        preview = BeautifulSoup(sommario, "html.parser").get_text()[:250] + "..."
-        riassunto, rilevanza, categoria, tema = genera_microriassunto(entry.title, preview, e_ufficiale=e_ufficiale)
+        testo_completo = BeautifulSoup(sommario, "html.parser").get_text().strip()
+        preview = testo_completo[:250] + ("..." if len(testo_completo) > 250 else "")
+        titolo = pulisci_titolo(entry.title)
+        data_pub = estrai_data_pubblicazione(entry)
+        # All'AI il testo esteso (fino a 1200 char) per classificazione/riassunto più precisi
+        riassunto, rilevanza, categoria, tema = genera_microriassunto(titolo, testo_completo[:1200], e_ufficiale=e_ufficiale)
         # Regola fonte -> categoria, con fallback garantito (mai vuota)
         if not e_ufficiale:
             categoria = "news"
@@ -110,7 +141,7 @@ def _ingest_rss(f: Dict) -> List[Tuple]:
         if not rilevanza:
             rilevanza = "media"
         risultati.append((
-            entry.title,
+            titolo,
             entry.link,
             preview,
             f['macro'],
@@ -120,6 +151,7 @@ def _ingest_rss(f: Dict) -> List[Tuple]:
             rilevanza,
             categoria,
             tema,
+            data_pub,
         ))
     return risultati
 
@@ -189,8 +221,8 @@ def esegui_scansione_notturna() -> None:
 
         if articoli_scovati:
             query_insert = """
-                INSERT INTO articles (titolo, link, preview, macro, area, fonte, riassunto_ai, rilevanza, tipo_atto, tema)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                INSERT INTO articles (titolo, link, preview, macro, area, fonte, riassunto_ai, rilevanza, tipo_atto, tema, data_pubblicazione)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT (link) DO NOTHING
             """
             cur.executemany(query_insert, articoli_scovati)
