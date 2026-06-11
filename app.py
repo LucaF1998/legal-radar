@@ -776,16 +776,19 @@ def genera_sintesi_groq(url: str, preview_text: str) -> str:
         return f"⚠️ Errore AI ({r.status_code})"
     except: return "⚠️ Connessione AI fallita."
 
-def genera_microriassunto_groq(titolo: str, preview: str, e_ufficiale: bool = True) -> Dict[str, Optional[str]]:
+def genera_microriassunto_groq(titolo: str, preview: str, e_ufficiale: bool = True,
+                               serve_titolo: bool = False) -> Dict[str, Optional[str]]:
     """Genera riassunto + rilevanza + (per fonti ufficiali) categoria legge/provvedimento + tema.
-    Ritorna {'riassunto','rilevanza','categoria','tema'}. Fail-safe: None su errore.
+    Se serve_titolo=True (titolo del feed rotto), chiede all'AI anche un titolo dal testo.
+    Ritorna {'riassunto','rilevanza','categoria','tema','titolo'}. Fail-safe: None su errore.
     Nota: per le fonti editoriali la categoria è imposta a 'news' a monte (l'AI non la decide)."""
-    vuoto = {"riassunto": None, "rilevanza": None, "categoria": None, "tema": None}
+    vuoto = {"riassunto": None, "rilevanza": None, "categoria": None, "tema": None, "titolo": None}
     raw_key = st.secrets.get("GROQ_API_KEY", "").strip()
     if not raw_key.startswith("gsk_"):
         return vuoto
 
-    testo = f"Titolo: {titolo}\n\nAnteprima: {preview}"
+    # Se il titolo è rotto non lo passo all'AI (la confonderebbe): solo il testo
+    testo = f"Anteprima: {preview}" if serve_titolo else f"Titolo: {titolo}\n\nAnteprima: {preview}"
     api_url = "https://api.groq.com/openai/v1/chat/completions"
     headers = {"Authorization": f"Bearer {raw_key}", "Content-Type": "application/json"}
 
@@ -807,15 +810,24 @@ def genera_microriassunto_groq(titolo: str, preview: str, e_ufficiale: bool = Tr
         regola_categoria = ""
         spiega_categoria = ""
 
+    if serve_titolo:
+        regola_titolo = '"titolo": "<titolo conciso e informativo in italiano, max 12 parole>", '
+        spiega_titolo = ("- titolo: il feed non fornisce un titolo valido; scrivilo tu, conciso e informativo, "
+                         "come lo scriverebbe una testata giuridica (niente virgolette interne).\n")
+    else:
+        regola_titolo = ""
+        spiega_titolo = ""
+
     system_prompt = (
         "Sei un assistente legale che pre-analizza novità normative, giurisprudenziali e di settore per un team "
         "di compliance specializzato nei comparatori online italiani (finanza, assicurazioni, utility). "
-        "Dato titolo e anteprima, rispondi ESCLUSIVAMENTE con un oggetto JSON valido, senza testo prima o dopo:\n"
-        '{"riassunto": "<1-2 frasi in italiano, chiare e concrete>", '
+        "Dato il contenuto, rispondi ESCLUSIVAMENTE con un oggetto JSON valido, senza testo prima o dopo:\n"
+        '{' + regola_titolo + '"riassunto": "<1-2 frasi in italiano, chiare e concrete>", '
         '"rilevanza": "<alta|media>", '
         + regola_categoria +
         '"tema": "<tema giuridico principale>"}\n\n'
         "Regole:\n"
+        + spiega_titolo +
         "- rilevanza: \"alta\" se impatta direttamente i comparatori (sanzioni, telemarketing, consenso, "
         "trasparenza tariffaria, data breach, intermediazione); \"media\" altrimenti.\n"
         + spiega_categoria +
@@ -847,7 +859,8 @@ def genera_microriassunto_groq(titolo: str, preview: str, e_ufficiale: bool = Tr
         if categoria not in ("legge", "provvedimento", "sentenza"):
             categoria = None
         tema = (dati.get("tema") or "").strip()[:100] or None
-        return {"riassunto": riassunto, "rilevanza": rilevanza, "categoria": categoria, "tema": tema}
+        titolo_ai = (dati.get("titolo") or "").strip()[:200] or None
+        return {"riassunto": riassunto, "rilevanza": rilevanza, "categoria": categoria, "tema": tema, "titolo": titolo_ai}
     except Exception as e:
         logging.error("Microriassunto fallito: %s", e)
         return vuoto
@@ -868,6 +881,7 @@ def _classifica_con_fallback(meta: Dict, fonte: Dict) -> Dict:
         "rilevanza": meta.get("rilevanza") or "media",
         "categoria": categoria,
         "tema": tema,
+        "titolo": meta.get("titolo"),
     }
 
 def pulisci_titolo(titolo: str) -> str:
@@ -884,6 +898,32 @@ def pulisci_titolo(titolo: str) -> str:
     t = re.sub(r"\bnull\b\s*-?\s*", "", t).strip()
     t = re.sub(r"\s{2,}", " ", t)
     return t or titolo  # se la pulizia svuota tutto, tieni l'originale
+
+def titolo_invalido(titolo: str) -> bool:
+    """Rileva i titoli-segnaposto rotti alla fonte (es. AGCM: '$con.titolo1').
+    Un titolo è invalido se vuoto, se è solo 'null', o se è/contiene solo variabili
+    di template non risolte tipo $var, ${var}, {{var}}, %var%."""
+    if not titolo or not titolo.strip():
+        return True
+    t = titolo.strip()
+    if t.lower() in ("null", "none", "undefined"):
+        return True
+    # Solo variabili di template, eventualmente più d'una separate da spazi/punteggiatura
+    if re.fullmatch(r"[\s\W]*(?:\$\{?[\w.]+\}?|\{\{[\w.\s]+\}\}|%[\w.]+%)[\s\W]*", t):
+        return True
+    return False
+
+def titolo_da_testo(testo: str, max_len: int = 110) -> str:
+    """Deriva un titolo leggibile dalla prima frase del testo (fallback deterministico)."""
+    if not testo:
+        return "Aggiornamento dalla fonte"
+    t = re.sub(r"\s{2,}", " ", testo.strip())
+    # Prima frase: taglio al primo punto 'forte' se cade in un punto ragionevole
+    m = re.match(r"^(.{30,}?[.!?])\s", t + " ")
+    frase = m.group(1) if m else t
+    if len(frase) > max_len:
+        frase = frase[:max_len].rsplit(" ", 1)[0] + "…"
+    return frase.strip()
 
 def estrai_data_pubblicazione(entry) -> Optional[datetime]:
     """Estrae la data di pubblicazione reale dal feed RSS, se presente."""
@@ -905,13 +945,19 @@ def _ingest_rss(f: Dict) -> List[Dict]:
         sommario = entry.summary if hasattr(entry, 'summary') else ""
         testo_completo = BeautifulSoup(sommario, "html.parser").get_text().strip()
         preview = testo_completo[:250] + ("..." if len(testo_completo) > 250 else "")
-        titolo = pulisci_titolo(entry.title)
+        titolo = pulisci_titolo(getattr(entry, 'title', '') or '')
+        # Titolo rotto alla fonte (es. AGCM '$con.titolo1')? Lo faremo generare all'AI
+        serve_titolo = titolo_invalido(titolo)
         data_pub = estrai_data_pubblicazione(entry)
         # All'AI passo il testo esteso (fino a 1200 caratteri), non la preview troncata:
         # più contesto = classificazione e riassunto più precisi, stessa singola chiamata.
         meta = _classifica_con_fallback(
-            genera_microriassunto_groq(titolo, testo_completo[:1200], e_ufficiale=e_ufficiale), f
+            genera_microriassunto_groq(titolo, testo_completo[:1200],
+                                       e_ufficiale=e_ufficiale, serve_titolo=serve_titolo), f
         )
+        if serve_titolo:
+            # Titolo dall'AI; se l'AI non risponde, prima frase del testo (mai vuoto)
+            titolo = meta.get("titolo") or titolo_da_testo(testo_completo)
         risultati.append({
             "Titolo": titolo, "Link": entry.link, "Preview": preview,
             "Macro": f['macro'], "Area": f['area'], "Fonte": f['nome'],
