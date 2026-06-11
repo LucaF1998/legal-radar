@@ -34,6 +34,30 @@ def pulisci_titolo(titolo: str) -> str:
     return t or titolo
 
 
+def titolo_invalido(titolo: str) -> bool:
+    """Rileva i titoli-segnaposto rotti alla fonte (es. AGCM: '$con.titolo1')."""
+    if not titolo or not titolo.strip():
+        return True
+    t = titolo.strip()
+    if t.lower() in ("null", "none", "undefined"):
+        return True
+    if re.fullmatch(r"[\s\W]*(?:\$\{?[\w.]+\}?|\{\{[\w.\s]+\}\}|%[\w.]+%)[\s\W]*", t):
+        return True
+    return False
+
+
+def titolo_da_testo(testo: str, max_len: int = 110) -> str:
+    """Deriva un titolo leggibile dalla prima frase del testo (fallback deterministico)."""
+    if not testo:
+        return "Aggiornamento dalla fonte"
+    t = re.sub(r"\s{2,}", " ", testo.strip())
+    m = re.match(r"^(.{30,}?[.!?])\s", t + " ")
+    frase = m.group(1) if m else t
+    if len(frase) > max_len:
+        frase = frase[:max_len].rsplit(" ", 1)[0] + "…"
+    return frase.strip()
+
+
 def estrai_data_pubblicazione(entry) -> Optional[datetime]:
     """Estrae la data di pubblicazione reale dal feed RSS, se presente."""
     for campo in ("published_parsed", "updated_parsed"):
@@ -46,11 +70,13 @@ def estrai_data_pubblicazione(entry) -> Optional[datetime]:
     return None
 
 
-def genera_microriassunto(titolo: str, preview: str, e_ufficiale: bool = True) -> Tuple[Optional[str], Optional[str], Optional[str], Optional[str]]:
-    """Riassunto + rilevanza + categoria + tema via Groq (JSON). Fail-safe: tutti None su errore.
-    Per fonti ufficiali la categoria è legge/provvedimento; per editoriali non viene chiesta (sarà 'news')."""
+def genera_microriassunto(titolo: str, preview: str, e_ufficiale: bool = True,
+                          serve_titolo: bool = False) -> Tuple[Optional[str], Optional[str], Optional[str], Optional[str], Optional[str]]:
+    """Riassunto + rilevanza + categoria + tema (+ titolo se serve_titolo) via Groq (JSON).
+    Ritorna (riassunto, rilevanza, categoria, tema, titolo_ai). Fail-safe: tutti None su errore.
+    Per fonti ufficiali la categoria è legge/provvedimento/sentenza; per editoriali non viene chiesta (sarà 'news')."""
     if not GROQ_API_KEY.startswith("gsk_"):
-        return None, None, None, None
+        return None, None, None, None, None
     api_url = "https://api.groq.com/openai/v1/chat/completions"
     headers = {"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"}
 
@@ -70,14 +96,23 @@ def genera_microriassunto(titolo: str, preview: str, e_ufficiale: bool = True) -
         regola_cat = ""
         spiega_cat = ""
 
+    if serve_titolo:
+        regola_tit = '"titolo": "<titolo conciso e informativo in italiano, max 12 parole>", '
+        spiega_tit = ("- titolo: il feed non fornisce un titolo valido; scrivilo tu, conciso e informativo, "
+                      "come lo scriverebbe una testata giuridica (niente virgolette interne).\n")
+    else:
+        regola_tit = ""
+        spiega_tit = ""
+
     system_prompt = (
         "Sei un assistente legale che pre-analizza novità normative, giurisprudenziali e di settore per un team "
         "di compliance specializzato nei comparatori online italiani (finanza, assicurazioni, utility). "
-        "Dato titolo e anteprima, rispondi ESCLUSIVAMENTE con un oggetto JSON valido, senza testo prima o dopo:\n"
-        '{"riassunto": "<1-2 frasi in italiano>", "rilevanza": "<alta|media>", '
+        "Dato il contenuto, rispondi ESCLUSIVAMENTE con un oggetto JSON valido, senza testo prima o dopo:\n"
+        '{' + regola_tit + '"riassunto": "<1-2 frasi in italiano>", "rilevanza": "<alta|media>", '
         + regola_cat +
         '"tema": "<tema giuridico principale>"}\n\n'
         "Regole:\n"
+        + spiega_tit +
         "- rilevanza: \"alta\" se impatta direttamente i comparatori (sanzioni, telemarketing, consenso, "
         "trasparenza tariffaria, data breach, intermediazione); \"media\" altrimenti.\n"
         + spiega_cat +
@@ -85,11 +120,12 @@ def genera_microriassunto(titolo: str, preview: str, e_ufficiale: bool = True) -
         "Bancario e finanziario, Tributario, Consumatori e pratiche commerciali, Concorrenza, Intelligenza artificiale. "
         "Se nessuno calza, indica tu il tema più appropriato in 1-3 parole."
     )
+    contenuto_utente = f"Anteprima: {preview}" if serve_titolo else f"Titolo: {titolo}\n\nAnteprima: {preview}"
     payload = {
         "model": "llama-3.3-70b-versatile",
         "messages": [
             {"role": "system", "content": system_prompt},
-            {"role": "user", "content": f"Titolo: {titolo}\n\nAnteprima: {preview}"}
+            {"role": "user", "content": contenuto_utente}
         ],
         "temperature": 0.1,
         "response_format": {"type": "json_object"}
@@ -98,7 +134,7 @@ def genera_microriassunto(titolo: str, preview: str, e_ufficiale: bool = True) -
         r = requests.post(api_url, headers=headers, json=payload, timeout=15)
         if r.status_code != 200:
             logging.error("Microriassunto: errore AI %s per '%s'", r.status_code, titolo[:50])
-            return None, None, None, None
+            return None, None, None, None, None
         dati = json.loads(r.json()['choices'][0]['message']['content'].strip())
         riassunto = (dati.get("riassunto") or "").strip()[:600] or None
         rilevanza = (dati.get("rilevanza") or "").strip().lower()
@@ -108,10 +144,11 @@ def genera_microriassunto(titolo: str, preview: str, e_ufficiale: bool = True) -
         if categoria not in ("legge", "provvedimento", "sentenza"):
             categoria = None
         tema = (dati.get("tema") or "").strip()[:100] or None
-        return riassunto, rilevanza, categoria, tema
+        titolo_ai = (dati.get("titolo") or "").strip()[:200] or None
+        return riassunto, rilevanza, categoria, tema, titolo_ai
     except Exception as e:
         logging.error("Microriassunto fallito per '%s': %s", titolo[:50], e)
-        return None, None, None, None
+        return None, None, None, None, None
 
 
 # ----------------------------------------------------------------------
@@ -127,10 +164,15 @@ def _ingest_rss(f: Dict) -> List[Tuple]:
         sommario = entry.summary if hasattr(entry, 'summary') else ""
         testo_completo = BeautifulSoup(sommario, "html.parser").get_text().strip()
         preview = testo_completo[:250] + ("..." if len(testo_completo) > 250 else "")
-        titolo = pulisci_titolo(entry.title)
+        titolo = pulisci_titolo(getattr(entry, 'title', '') or '')
+        serve_titolo = titolo_invalido(titolo)
         data_pub = estrai_data_pubblicazione(entry)
         # All'AI il testo esteso (fino a 1200 char) per classificazione/riassunto più precisi
-        riassunto, rilevanza, categoria, tema = genera_microriassunto(titolo, testo_completo[:1200], e_ufficiale=e_ufficiale)
+        riassunto, rilevanza, categoria, tema, titolo_ai = genera_microriassunto(
+            titolo, testo_completo[:1200], e_ufficiale=e_ufficiale, serve_titolo=serve_titolo)
+        if serve_titolo:
+            # Titolo rotto alla fonte (es. AGCM '$con.titolo1'): AI, poi prima frase del testo
+            titolo = titolo_ai or titolo_da_testo(testo_completo)
         # Regola fonte -> categoria, con fallback garantito (mai vuota)
         if not e_ufficiale:
             categoria = "news"
