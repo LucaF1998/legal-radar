@@ -684,16 +684,43 @@ st.markdown("""
     /* superficie generale */
     .stApp{ background:var(--bg); }
     html, body, [class*="css"]{ font-family:var(--sf); -webkit-font-smoothing:antialiased; color:var(--ink); }
-    .block-container{ padding-top:2.4rem; padding-bottom:4rem; max-width:960px; }
+    .block-container{ padding-top:3.5rem; padding-bottom:4rem; max-width:960px; }
 
     /* titoli di sistema */
     h1, h2, h3{ letter-spacing:-0.3px; color:var(--ink); font-weight:600; }
     h1{ font-size:30px; }
     h2{ font-size:23px; }
 
-    /* sidebar pulita */
+    /* ---- SIDEBAR ---- */
     section[data-testid="stSidebar"]{ background:var(--surface); border-right:1px solid var(--hair); }
-    section[data-testid="stSidebar"] .stRadio label{ font-size:14px; }
+    section[data-testid="stSidebar"] .block-container{ padding-top:2.2rem; }
+    .sb-brand{ font-size:21px; font-weight:700; letter-spacing:-0.4px; color:var(--ink); margin-bottom:14px; }
+    .sb-user{ font-size:13px; font-weight:500; color:var(--ink-soft); margin-bottom:6px;
+              white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+    .sb-role{ font-size:10.5px; font-weight:700; letter-spacing:.4px; text-transform:uppercase;
+              background:rgba(0,0,0,.05); color:var(--ink-soft); border-radius:980px; padding:2.5px 9px; margin-right:5px; }
+    .sb-unread{ display:inline-block; font-size:11.5px; font-weight:600; color:var(--accent);
+                background:var(--accent-soft); border-radius:980px; padding:3px 11px; margin-bottom:18px; }
+
+    /* radio di navigazione -> lista a pillole */
+    section[data-testid="stSidebar"] div[role="radiogroup"]{ gap:2px; }
+    section[data-testid="stSidebar"] div[role="radiogroup"] > label{
+        padding:9px 13px; border-radius:11px; transition:background .15s; width:100%;
+        margin:0; cursor:pointer;
+    }
+    section[data-testid="stSidebar"] div[role="radiogroup"] > label:hover{ background:rgba(0,0,0,.04); }
+    /* nascondo il pallino del radio */
+    section[data-testid="stSidebar"] div[role="radiogroup"] > label > div:first-child{ display:none; }
+    section[data-testid="stSidebar"] div[role="radiogroup"] > label p{
+        font-size:14px; font-weight:500; color:var(--ink-soft);
+    }
+    /* voce selezionata: pillola azzurra */
+    section[data-testid="stSidebar"] div[role="radiogroup"] > label:has(input:checked){
+        background:var(--accent-soft);
+    }
+    section[data-testid="stSidebar"] div[role="radiogroup"] > label:has(input:checked) p{
+        color:var(--accent); font-weight:600;
+    }
 
     /* ---- CARD ATTI (lista sezioni) ---- */
     .radar-card{
@@ -747,6 +774,8 @@ st.markdown("""
     .stButton > button:hover{ background:rgba(0,0,0,.09); color:var(--ink); border:none; }
     .stButton > button[kind="primary"]{ background:var(--accent); color:#fff; }
     .stButton > button[kind="primary"]:hover{ background:#0077ed; color:#fff; }
+    .stButton > button:disabled{ background:transparent; color:var(--ink-faint); opacity:1; }
+    .stButton > button:disabled:hover{ background:transparent; }
 
     /* input e select arrotondati */
     .stTextInput input, .stSelectbox div[data-baseweb="select"] > div{
@@ -1111,16 +1140,19 @@ if st.session_state.user is None:
 
 # --- 6. INTERFACCIA UTENTE AUTENTICATO ---
 with st.sidebar:
-    st.title("⚖️ Legal Radar")
+    # Brand pulito
+    st.markdown('<div class="sb-brand">Legal Radar<span style="color:var(--accent);">.</span></div>', unsafe_allow_html=True)
+    # Utente sobrio + contatore come badge
     ruolo_corrente = st.session_state.user.get('role', 'user')
-    badge_ruolo = "👑 Admin" if ruolo_corrente == "admin" else "👤 Utente"
-    st.write(f"{badge_ruolo}: **{st.session_state.user['username']}**")
-
-    # Conteggi non-letti mostrati come riepilogo (le label del radio restano fisse)
+    ruolo_label = "Admin" if ruolo_corrente == "admin" else "Utente"
+    e_username = html.escape(str(st.session_state.user['username']))
     non_letti = db.conta_non_letti(st.session_state.user['id'])
     tot_non_letti = sum(non_letti.values())
-    if tot_non_letti:
-        st.caption(f"📬 {tot_non_letti} da leggere")
+    badge_unread = f'<span class="sb-unread">{tot_non_letti} da leggere</span>' if tot_non_letti else ''
+    st.markdown(
+        f'<div class="sb-user"><span class="sb-role">{ruolo_label}</span> {e_username}</div>{badge_unread}',
+        unsafe_allow_html=True
+    )
 
     opzioni_nav = [
         "🏠 Dashboard",
@@ -1131,16 +1163,15 @@ with st.sidebar:
         "🔖 I Miei Salvati",
         "⚙️ Gestione Fonti"
     ]
-    pagina = st.radio("Navigazione", opzioni_nav, key="nav_pagina")
+    pagina = st.radio("Navigazione", opzioni_nav, key="nav_pagina", label_visibility="collapsed")
     
     st.divider()
-    if st.button("🔄 Sincronizza ed Espandi Archivio", type="primary", use_container_width=True):
-        with st.spinner("Scansione fonti legali e scrittura in archivio..."):
+    if st.button("Sincronizza archivio", type="primary", use_container_width=True):
+        with st.spinner("Scansione fonti in corso…"):
             sincronizza_radar_in_database()
-            st.success("Archivio aggiornato!")
             st.rerun()
             
-    if st.button("🚪 Esci", use_container_width=True):
+    if st.button("Esci", use_container_width=True):
         st.session_state.user = None
         st.rerun()
 
@@ -1189,44 +1220,39 @@ def mostra_hub_legale(lista_articoli: List[Dict], tipo_bacheca: str):
                 f'</div>'
             )
             st.markdown(card_html, unsafe_allow_html=True)
-            
-            c1, c2, c3 = st.columns([1, 1, 2])
-            with c1:
+            link = art['link']
+            # Bottoni azione: pillole compatte e ravvicinate (l'ultima colonna vuota le tiene strette a sinistra)
+            b1, b2, b3, _sp = st.columns([1, 1, 1, 2])
+            with b1:
                 if tipo_bacheca == "bookmarks":
-                    if st.button("🗑️ Rimuovi dai preferiti", key=f"rem_{art['id']}"):
+                    if st.button("Rimuovi", key=f"rem_{art['id']}", use_container_width=True):
                         db.rimuovi_bookmark(st.session_state.user['id'], art['id'])
                         st.rerun()
                 else:
                     if db.check_bookmark_esiste(st.session_state.user['id'], art['id']):
-                        st.caption("🔖 Già salvato nei tuoi preferiti")
+                        st.button("Salvato ✓", key=f"saved_{art['id']}", use_container_width=True, disabled=True)
                     else:
-                        if st.button("🔖 Salva per dopo", key=f"save_{art['id']}"):
+                        if st.button("Salva", key=f"save_{art['id']}", use_container_width=True):
                             db.aggiungi_bookmark(st.session_state.user['id'], art['id'])
-                            st.success("Articolo salvato!")
                             st.rerun()
-            with c2:
-                # Bottone esplicito per marcare letto (copre il caso del link esterno)
+            with b2:
                 if not e_letto:
-                    if st.button("✓ Segna letto", key=f"read_{art['id']}"):
+                    if st.button("Segna letto", key=f"read_{art['id']}", use_container_width=True):
                         db.segna_letto(st.session_state.user['id'], art['id'])
                         st.rerun()
                 else:
-                    st.caption("✓ Letto")
-            
-            link = art['link']
-            # Se l'analisi non c'è ancora, mostro il bottone per generarla
-            if link not in st.session_state.ai_summaries:
-                with c3:
-                    if st.button("✨ Genera Analisi AI Strategica", key=f"ai_{art['id']}"):
-                        with st.spinner("L'AI sta conducendo l'analisi verticale per i comparatori..."):
+                    st.button("Letto ✓", key=f"readd_{art['id']}", use_container_width=True, disabled=True)
+            with b3:
+                # Mostro il bottone Analisi solo se non già generata
+                if link not in st.session_state.ai_summaries:
+                    if st.button("✦ Analisi AI", key=f"ai_{art['id']}", use_container_width=True):
+                        with st.spinner("Analisi in corso…"):
                             st.session_state.ai_summaries[link] = genera_sintesi_groq(link, art['preview'])
-                            # Se l'articolo non ha ancora il micro-riassunto, lo genero e lo salvo ora
                             if not art.get('riassunto_ai') and art['id'] not in st.session_state.micro_riassunti:
                                 meta = genera_microriassunto_groq(art.get('titolo',''), art.get('preview',''))
                                 if meta['riassunto']:
                                     st.session_state.micro_riassunti[art['id']] = meta['riassunto']
                                     db.aggiorna_riassunto_articolo(art['id'], meta['riassunto'], meta['rilevanza'])
-                            # Generare l'analisi implica aver "consumato" l'articolo: marca letto
                             db.segna_letto(st.session_state.user['id'], art['id'])
                         # niente st.rerun(): mostro il risultato qui sotto, nello stesso ciclo
             # Se l'analisi esiste (appena generata o già presente), la mostro sotto la card
