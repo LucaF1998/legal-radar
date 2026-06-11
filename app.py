@@ -125,6 +125,20 @@ class LegalRadarDB:
             "ALTER TABLE articles ADD COLUMN IF NOT EXISTS tema VARCHAR(100)",
             "ALTER TABLE articles ADD COLUMN IF NOT EXISTS data_pubblicazione TIMESTAMP",
             "CREATE INDEX IF NOT EXISTS idx_articles_tipoatto ON articles(tipo_atto, data_scansione DESC)",
+            # --- TABELLA KEYWORD DEGLI ALERT (gestibile dagli admin) ---
+            """
+            CREATE TABLE IF NOT EXISTS alert_keywords (
+                id SERIAL PRIMARY KEY,
+                keyword VARCHAR(100) UNIQUE NOT NULL
+            )
+            """,
+            # Seed iniziale: le keyword storiche, inserite solo se la tabella è vuota
+            """
+            INSERT INTO alert_keywords (keyword)
+            SELECT k FROM (VALUES ('sanzion'), ('ordinanza'), ('condanna'), ('violazion'),
+                                  ('scadenza'), ('obbligo'), ('divieto'), ('sentenza')) AS v(k)
+            WHERE NOT EXISTS (SELECT 1 FROM alert_keywords)
+            """,
         )
         try:
             with self.get_cursor() as cur:
@@ -566,9 +580,37 @@ class LegalRadarDB:
             righe = cur.fetchall()
         return {r['macro']: r['n'] for r in righe}
 
-    # --- MODIFICA: ANCHE GLI ALERT DELLA HOME ESCLUDONO LE FONTI SPENTE ---
-    def estrai_ultimi_alert_urgenti(self, user_id: int) -> List[Dict]:
-        keywords = ['%sanzion%', '%ordinanza%', '%condanna%', '%violazion%', '%scadenza%', '%obbligo%', '%divieto%', '%sentenza%']
+    # --- KEYWORD DEGLI ALERT: GESTIBILI DAGLI ADMIN, CONDIVISE DAL TEAM ---
+    def lista_keywords_alert(self) -> List[Dict]:
+        """Tutte le keyword di alert configurate, in ordine alfabetico."""
+        with self.get_cursor(dict_cursor=True) as cur:
+            cur.execute("SELECT id, keyword FROM alert_keywords ORDER BY keyword ASC")
+            righe = cur.fetchall()
+        return [dict(r) for r in righe]
+
+    def aggiungi_keyword_alert(self, keyword: str) -> bool:
+        """Aggiunge una keyword (minuscola, senza spazi esterni). False se già esistente o vuota."""
+        k = (keyword or "").strip().lower()
+        if not k or len(k) > 100:
+            return False
+        try:
+            with self.get_cursor() as cur:
+                cur.execute("INSERT INTO alert_keywords (keyword) VALUES (%s) ON CONFLICT (keyword) DO NOTHING", (k,))
+                return cur.rowcount > 0
+        except Exception as e:
+            logging.error("Errore aggiunta keyword alert: %s", e)
+            return False
+
+    def rimuovi_keyword_alert(self, keyword_id: int) -> None:
+        with self.get_cursor() as cur:
+            cur.execute("DELETE FROM alert_keywords WHERE id = %s", (keyword_id,))
+
+    # Gli alert usano le keyword della tabella ed escludono le fonti spente dall'utente
+    def estrai_ultimi_alert_urgenti(self, user_id: int, limite: int = 4) -> List[Dict]:
+        kw = [k['keyword'] for k in self.lista_keywords_alert()]
+        if not kw:
+            return []  # nessuna keyword configurata, nessun alert
+        pattern = [f"%{k}%" for k in kw]
 
         query = """
             SELECT * FROM articles 
@@ -578,10 +620,10 @@ class LegalRadarDB:
                 JOIN user_source_preferences usp ON s.id = usp.source_id
                 WHERE usp.user_id = %s AND usp.is_active = FALSE
             )
-            ORDER BY data_scansione DESC LIMIT 4
-        """.format(" OR ".join(["titolo ILIKE %s" for _ in keywords]))
+            ORDER BY COALESCE(data_pubblicazione, data_scansione) DESC LIMIT %s
+        """.format(" OR ".join(["titolo ILIKE %s" for _ in pattern]))
 
-        params = keywords + [user_id]
+        params = pattern + [user_id, limite]
         with self.get_cursor(dict_cursor=True) as cur:
             cur.execute(query, params)
             alert = cur.fetchall()
@@ -1256,6 +1298,27 @@ if pagina_pulita == "🏠 Dashboard":
                 voci += f'<div class="ti"><div class="tm">{tm}</div><a href="{lk}" target="_blank">{tt}</a></div>'
             st.markdown(f'<div class="ticker-box"><h3>Ultim\'ora</h3>{voci}</div>', unsafe_allow_html=True)
 
+        # --- STRISCIA ALERT (keyword configurate dal team) ---
+        alert_urgenti = db.estrai_ultimi_alert_urgenti(st.session_state.user['id'], limite=3)
+        if alert_urgenti:
+            voci_alert = ""
+            for al in alert_urgenti:
+                a_tt = html.escape(str(al.get('titolo') or ''))
+                a_lk = html.escape(str(al.get('link') or ''), quote=True)
+                a_fn = html.escape(str(al.get('fonte') or ''))
+                voci_alert += (
+                    f'<div style="padding:7px 0; border-bottom:1px solid rgba(179,38,30,.15);">'
+                    f'<span style="font-size:10px; font-weight:700; color:var(--danger); text-transform:uppercase; letter-spacing:.5px;">⚠ {a_fn}</span> '
+                    f'<a href="{a_lk}" target="_blank" style="font-size:13.5px; font-weight:600; color:var(--ink); text-decoration:none;">{a_tt}</a>'
+                    f'</div>'
+                )
+            st.markdown(
+                f'<div style="background:var(--danger-soft); border:1px solid rgba(179,38,30,.25); border-radius:8px; padding:12px 16px; margin-top:20px;">'
+                f'<div style="font-family:Fraunces,serif; font-size:14px; font-weight:600; color:var(--danger); margin-bottom:6px;">Alert del team</div>'
+                f'{voci_alert}</div>',
+                unsafe_allow_html=True
+            )
+
         # --- GRIGLIA IN EVIDENZA (i successivi 3) ---
         secondari = in_evidenza[1:4]
         if secondari:
@@ -1441,6 +1504,37 @@ elif pagina_pulita == "⚙️ Gestione Fonti":
             col_t.markdown(f"**{html.escape(str(f['nome']))}** <span style='font-size:11px;color:#888;'>· {tipo_corrente}</span>", unsafe_allow_html=True)
             col_b.caption("🔒")
         st.write("---")
+
+    # SEZIONE 3-BIS - KEYWORD DEGLI ALERT (solo admin)
+    if is_admin:
+        st.divider()
+        st.subheader("🚨 Parole chiave degli Alert (Admin)")
+        st.caption("Gli articoli il cui titolo contiene una di queste parole compaiono nella striscia "
+                   "'Alert del team' in Dashboard. La corrispondenza è parziale: 'sanzion' intercetta "
+                   "sanzione, sanzioni, sanzionato. Valgono per tutto il team.")
+        kw_correnti = db.lista_keywords_alert()
+        if kw_correnti:
+            n_col = 4
+            righe_kw = [kw_correnti[i:i+n_col] for i in range(0, len(kw_correnti), n_col)]
+            for riga in righe_kw:
+                cols = st.columns(n_col)
+                for col, kw in zip(cols, riga):
+                    with col:
+                        if st.button(f"✕ {kw['keyword']}", key=f"delkw_{kw['id']}", use_container_width=True,
+                                     help="Clicca per rimuovere questa parola chiave"):
+                            db.rimuovi_keyword_alert(kw['id'])
+                            st.rerun()
+        else:
+            st.info("Nessuna parola chiave configurata: la striscia Alert non mostrerà nulla.")
+        with st.form("form_add_keyword", clear_on_submit=True):
+            c_kw, c_btn = st.columns([3, 1])
+            nuova_kw = c_kw.text_input("Nuova parola chiave", placeholder="es. ai act, dora, telemarketing...",
+                                       label_visibility="collapsed")
+            if c_btn.form_submit_button("➕ Aggiungi", use_container_width=True):
+                if db.aggiungi_keyword_alert(nuova_kw):
+                    st.rerun()
+                else:
+                    st.warning("Parola vuota o già presente.")
 
     # SEZIONE 4 - GESTIONE UTENTI (solo admin)
     if is_admin:
