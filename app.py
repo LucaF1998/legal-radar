@@ -666,108 +666,137 @@ if 'micro_riassunti' not in st.session_state: st.session_state.micro_riassunti =
 # --- 3. STILE GRAFICO ---
 st.markdown("""
 <style>
-    @import url('https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600&family=Inter:wght@400;500;600;700&display=swap');
+    @import url('https://fonts.googleapis.com/css2?family=Newsreader:opsz,wght@6..72,400..600&display=swap');
 
     :root{
-        --ink:#211a14; --ink-soft:#5c5147; --ink-faint:#9a8f82;
-        --paper:#f6f1ea; --surface:#fffdf9; --line:#e7ddd0;
-        --brand:#c2410c; --brand-deep:#9a330a; --brand-soft:#fbe9d9; --brand-tint:#fdf2ea;
-        --gold-soft:#f5ead6; --gold-ink:#7a5414;
-        --danger:#b3261e; --danger-soft:#fbe7e4;
+        --bg:#f5f5f7; --surface:#ffffff;
+        --ink:#1d1d1f; --ink-soft:#6e6e73; --ink-faint:#a1a1a6;
+        --hair:#ededf0;
+        --accent:#0071e3; --accent-soft:#e8f1fd; --accent-tint:#dbeafe;
+        --legge-bg:#fdf2e3; --legge-tx:#9a6712;
+        --provv-bg:#eaf0f7; --provv-tx:#2c4a6e;
+        --sent-bg:#f0ebf7; --sent-tx:#5b3f87;
+        --news-bg:#e9f4ee; --news-tx:#1f7a52;
+        --alta:#e8543f; --alta-soft:rgba(232,84,63,.12);
+        --sf:-apple-system,BlinkMacSystemFont,'SF Pro Display','Helvetica Neue',sans-serif;
     }
 
-    /* sfondo app e tipografia base */
-    .stApp { background-color: var(--paper); }
-    html, body, [class*="css"] { font-family: 'Inter', sans-serif; color: var(--ink); }
+    /* superficie generale */
+    .stApp{ background:var(--bg); }
+    html, body, [class*="css"]{ font-family:var(--sf); -webkit-font-smoothing:antialiased; color:var(--ink); }
+    .block-container{ padding-top:2.4rem; padding-bottom:4rem; max-width:960px; }
 
-    /* titoli nativi (st.title/header/subheader) in serif */
-    h1, h2, h3 { font-family: 'Fraunces', serif !important; letter-spacing: -0.3px; color: var(--ink) !important; }
+    /* titoli di sistema */
+    h1, h2, h3{ letter-spacing:-0.3px; color:var(--ink); font-weight:600; }
+    h1{ font-size:30px; }
+    h2{ font-size:23px; }
 
-    /* sidebar */
-    section[data-testid="stSidebar"] { background-color: var(--surface); border-right: 1px solid var(--line); }
+    /* sidebar pulita */
+    section[data-testid="stSidebar"]{ background:var(--surface); border-right:1px solid var(--hair); }
+    section[data-testid="stSidebar"] .stRadio label{ font-size:14px; }
 
-    /* bottoni nativi */
-    div.stButton > button { font-family:'Inter',sans-serif; font-weight:600; border-radius:6px; border:1px solid var(--line); color:var(--ink-soft); background:var(--surface); transition:all .15s; }
-    div.stButton > button:hover { border-color:var(--brand); color:var(--brand); }
-    div.stButton > button[kind="primary"] { background-color: var(--brand); color: #fff; border: none; }
-    div.stButton > button[kind="primary"]:hover { background-color: var(--brand-deep); box-shadow: 0 4px 14px rgba(194,65,12,0.25); color:#fff; }
-
-    /* input e ricerca */
-    div[data-testid="stTextInput"] input { border-radius:6px; border:1px solid var(--line); }
-    div[data-testid="stTextInput"] input:focus { border-color:var(--brand); box-shadow:0 0 0 2px var(--brand-soft); }
-
-    /* metriche native */
-    div[data-testid="stMetric"] { background: var(--surface); border:1px solid var(--line); border-top:3px solid var(--brand); border-radius:6px; padding:16px 18px; }
-    div[data-testid="stMetricValue"] { font-family:'Fraunces',serif; color:var(--brand); }
-    div[data-testid="stMetricLabel"] { color:var(--ink-faint); text-transform:uppercase; letter-spacing:0.5px; font-size:12px; }
-
-    /* ---- CARD ARTICOLO ---- */
-    .radar-card { background: var(--surface); border-radius: 8px; padding: 22px 24px; border: 1px solid var(--line); border-left: 4px solid var(--brand); margin-bottom: 18px; transition: transform .18s, box-shadow .18s; }
-    .radar-card:hover { transform: translateY(-2px); box-shadow: 0 6px 20px rgba(194,65,12,0.08); }
-    .radar-card-letto { background: #faf6f0; border-radius: 8px; padding: 22px 24px; border: 1px solid var(--line); border-left: 4px solid var(--line); margin-bottom: 18px; opacity: 0.72; }
-    .badge-nuovo { display: inline-block; padding: 3px 10px; border-radius: 4px; font-size: 10px; font-weight: 700; text-transform: uppercase; margin-left: 8px; background: var(--brand); color: #fff; letter-spacing: 1px; vertical-align: middle; }
-
-    .card-title { font-family:'Fraunces',serif; font-size: 20px; font-weight: 600; color: var(--ink); text-decoration: none; margin-bottom: 10px; display: block; line-height: 1.3; }
-    .card-title:hover { color: var(--brand); }
-    .card-preview { font-size: 14.5px; color: var(--ink-soft); margin-bottom: 4px; line-height: 1.65; }
-
-    .card-summary { font-size: 14px; color: var(--brand-deep); line-height: 1.5; background: var(--brand-tint); border: 1px solid #f3d5bf; padding: 14px 18px; border-radius: 6px; margin-top: 15px; font-weight:600; }
-
-    /* ---- TAG ---- */
-    .meta-tag { display: inline-block; padding: 3px 10px; border-radius: 4px; font-size: 11px; font-weight: 700; text-transform: uppercase; margin-right: 8px; margin-bottom: 12px; letter-spacing:0.4px; }
-    .tag-area { background: var(--brand-soft); color: var(--brand-deep); }
-    .tag-fonte { background: var(--gold-soft); color: var(--gold-ink); }
-    .tag-rango { background: transparent; color: var(--ink-faint); border: 1px solid var(--line); }
-    .card-microsummary { font-family:'Inter',sans-serif; font-size:13.5px; color:var(--brand-deep); background:var(--brand-tint); border-left:2px solid var(--brand); padding:8px 12px; border-radius:0 5px 5px 0; margin:0 0 12px; line-height:1.5; }
-    .badge-ril { font-size:10px; font-weight:700; letter-spacing:.4px; padding:3px 9px; border-radius:4px; text-transform:uppercase; margin-bottom:12px; display:inline-block; }
-    .badge-ril-alta { background:var(--danger-soft); color:var(--danger); }
-    .badge-ril-media { background:var(--gold-soft); color:var(--gold-ink); }
-
-    /* ===== DASHBOARD PRIMA PAGINA ===== */
-    :root{
-        --c-provv:#1b3a5b; --c-provv-soft:#e8eef4;
-        --c-sent:#5b3a82; --c-sent-soft:#efe9f5;
-        --c-news:#1f6b4f; --c-news-soft:#e6f1ea;
-        --c-legge:#8a5a14; --c-legge-soft:#f5ead6;
+    /* ---- CARD ATTI (lista sezioni) ---- */
+    .radar-card{
+        background:var(--surface); border-radius:18px; padding:22px 26px;
+        box-shadow:0 1px 3px rgba(0,0,0,.04), 0 6px 22px rgba(0,0,0,.045);
+        margin-bottom:14px; transition:transform .2s, box-shadow .2s;
     }
-    .kicker{display:inline-flex; align-items:center; gap:6px; font-size:11px; font-weight:700; letter-spacing:1px; text-transform:uppercase; padding:4px 10px; border-radius:4px;}
-    .k-provv{background:var(--c-provv-soft); color:var(--c-provv);}
-    .k-sent{background:var(--c-sent-soft); color:var(--c-sent);}
-    .k-news{background:var(--c-news-soft); color:var(--c-news);}
-    .k-legge{background:var(--c-legge-soft); color:var(--c-legge);}
-    .thumb{height:150px; border-radius:8px; position:relative; overflow:hidden; display:flex; align-items:center; justify-content:center; margin-bottom:0;}
-    .thumb-provv{background:linear-gradient(135deg,#1b3a5b,#2d567f);}
-    .thumb-sent{background:linear-gradient(135deg,#5b3a82,#7d56a8);}
-    .thumb-news{background:linear-gradient(135deg,#1f6b4f,#2f8a68);}
-    .thumb-legge{background:linear-gradient(135deg,#8a5a14,#b07a2d);}
-    .thumb .glyph{font-family:'Fraunces',serif; font-size:54px; color:rgba(255,255,255,.92); font-weight:600;}
-    .thumb .src-chip{position:absolute; bottom:10px; left:10px; background:rgba(255,255,255,.92); color:var(--ink); font-size:10px; font-weight:700; padding:3px 8px; border-radius:3px; text-transform:uppercase; letter-spacing:.4px;}
-    .thumb-lead{height:200px;}
-    .thumb-lead .glyph{font-size:72px;}
+    .radar-card:hover{ transform:translateY(-2px); box-shadow:0 2px 6px rgba(0,0,0,.06), 0 12px 34px rgba(0,0,0,.08); }
+    .radar-card.letta{ opacity:.55; }
 
-    .pp-card{background:var(--surface); border:1px solid var(--line); border-radius:8px; overflow:hidden; height:100%;}
-    .pp-body{padding:16px 18px;}
-    .pp-kicker-wrap{margin-bottom:10px;}
-    .pp-title{font-family:'Fraunces',serif; font-weight:600; line-height:1.25; color:var(--ink); text-decoration:none; display:block; margin-bottom:8px;}
-    .pp-title:hover{color:var(--brand);}
-    .pp-title-lead{font-size:26px; margin-bottom:12px;}
-    .pp-title-grid{font-size:16px;}
-    .pp-sum{color:var(--ink-soft); line-height:1.55;}
-    .pp-sum-lead{font-size:15px;}
-    .pp-sum-grid{font-size:12.5px;}
+    .card-title{
+        font-family:'Newsreader',serif; font-weight:500; font-size:22px; line-height:1.25;
+        letter-spacing:-0.2px; color:var(--ink); text-decoration:none; display:block; margin:13px 0 0;
+    }
+    .card-title:hover{ color:var(--accent); }
+    .card-preview{ margin-top:11px; font-size:14.5px; line-height:1.55; color:var(--ink-soft); }
+    .card-microsummary{
+        margin-top:11px; font-size:14px; line-height:1.55; color:var(--ink-soft);
+        background:var(--accent-soft); border-radius:12px; padding:11px 15px;
+    }
 
-    .ticker-box{background:var(--surface); border:1px solid var(--line); border-radius:8px; padding:16px 18px;}
-    .ticker-box h3{font-family:'Fraunces',serif; font-size:16px; margin:0 0 12px; padding-bottom:10px; border-bottom:2px solid var(--ink);}
-    .ti{padding:9px 0; border-bottom:1px solid var(--line);}
-    .ti:last-child{border-bottom:none;}
-    .ti .tm{font-size:10px; text-transform:uppercase; letter-spacing:.5px; color:var(--ink-faint); margin-bottom:3px;}
-    .ti a{font-size:13px; font-weight:500; color:var(--ink); text-decoration:none; line-height:1.4;}
-    .ti a:hover{color:var(--brand);}
+    /* badge a pillola */
+    .meta-tag{
+        display:inline-block; font-size:11.5px; font-weight:600; letter-spacing:.2px;
+        padding:4px 11px; border-radius:980px; margin-right:7px; vertical-align:middle;
+    }
+    .tag-area{ background:rgba(0,0,0,.05); color:var(--ink-soft); }
+    .tag-fonte{ background:rgba(0,0,0,.05); color:var(--ink-soft); }
+    .tag-rango{ background:rgba(0,0,0,.04); color:var(--ink-faint); }
+    .badge-ril{ font-size:11.5px; font-weight:600; padding:4px 11px; border-radius:980px; }
+    .badge-ril-alta{ background:var(--alta-soft); color:var(--alta); }
+    .badge-ril-media{ background:rgba(0,0,0,.05); color:var(--ink-soft); }
+    .badge-nuovo{
+        font-size:11px; font-weight:600; color:var(--accent); background:var(--accent-soft);
+        border-radius:980px; padding:3px 10px; margin-left:8px; vertical-align:2px;
+    }
 
-    .mini{background:var(--surface); border:1px solid var(--line); border-left:3px solid var(--brand); border-radius:6px; padding:13px 15px; height:100%;}
-    .mini .mm{font-size:10px; text-transform:uppercase; letter-spacing:.5px; color:var(--ink-faint); margin-bottom:5px;}
-    .mini a{font-family:'Fraunces',serif; font-size:14.5px; font-weight:500; color:var(--ink); text-decoration:none; line-height:1.35;}
-    .mini a:hover{color:var(--brand);}
+    /* categorie come badge pastello */
+    .cat-badge{ display:inline-block; font-size:11.5px; font-weight:600; padding:4px 11px; border-radius:980px; }
+    .cat-legge{ background:var(--legge-bg); color:var(--legge-tx); }
+    .cat-provv{ background:var(--provv-bg); color:var(--provv-tx); }
+    .cat-sent{ background:var(--sent-bg); color:var(--sent-tx); }
+    .cat-news{ background:var(--news-bg); color:var(--news-tx); }
+
+    /* bottoni Streamlit -> pillole Apple */
+    .stButton > button{
+        font-family:var(--sf); font-weight:500; font-size:14px;
+        border-radius:980px; border:none; background:rgba(0,0,0,.05); color:var(--ink);
+        padding:9px 20px; transition:.18s;
+    }
+    .stButton > button:hover{ background:rgba(0,0,0,.09); color:var(--ink); border:none; }
+    .stButton > button[kind="primary"]{ background:var(--accent); color:#fff; }
+    .stButton > button[kind="primary"]:hover{ background:#0077ed; color:#fff; }
+
+    /* input e select arrotondati */
+    .stTextInput input, .stSelectbox div[data-baseweb="select"] > div{
+        border-radius:12px !important; border-color:var(--hair) !important;
+    }
+
+    /* ---- DASHBOARD PRIMA PAGINA ---- */
+    .pp-hero-eyebrow{ font-size:13px; font-weight:600; color:var(--ink-soft); letter-spacing:.2px; }
+    .pp-hero-title{
+        font-family:'Newsreader',serif; font-weight:500; font-size:40px; line-height:1.13;
+        letter-spacing:-0.5px; color:var(--ink); text-decoration:none; display:block; margin:10px 0 0;
+    }
+    .pp-hero-title:hover{ color:var(--accent); }
+    .pp-hero-sub{ margin-top:16px; font-size:17px; line-height:1.55; color:var(--ink-soft); }
+    .pp-hero-row{ margin-top:22px; }
+
+    .pp-card{
+        background:var(--surface); border-radius:18px; padding:22px 24px; height:100%;
+        box-shadow:0 1px 3px rgba(0,0,0,.04), 0 6px 22px rgba(0,0,0,.045);
+        transition:transform .2s, box-shadow .2s;
+    }
+    .pp-card:hover{ transform:translateY(-2px); box-shadow:0 2px 6px rgba(0,0,0,.06), 0 12px 34px rgba(0,0,0,.08); }
+    .pp-card-title{
+        font-family:'Newsreader',serif; font-weight:500; font-size:20px; line-height:1.28;
+        letter-spacing:-0.2px; color:var(--ink); text-decoration:none; display:block; margin:13px 0 0;
+    }
+    .pp-card-title:hover{ color:var(--accent); }
+    .pp-card-sum{ margin-top:10px; font-size:14px; line-height:1.5; color:var(--ink-soft); }
+    .pp-foot{ margin-top:16px; font-size:12.5px; color:var(--ink-faint); font-weight:500; }
+
+    .pp-section{ display:flex; align-items:baseline; justify-content:space-between; margin:42px 0 18px; }
+    .pp-section h2{ font-size:23px; font-weight:600; letter-spacing:-0.3px; }
+
+    .ticker-box{ background:var(--surface); border-radius:18px; padding:20px 22px;
+        box-shadow:0 1px 3px rgba(0,0,0,.04), 0 6px 22px rgba(0,0,0,.045); }
+    .ticker-box h3{ font-size:13px; font-weight:600; color:var(--ink-soft); text-transform:uppercase; letter-spacing:.5px; margin:0 0 12px; }
+    .ti{ padding:10px 0; border-bottom:1px solid var(--hair); }
+    .ti:last-child{ border:none; }
+    .ti .tm{ font-size:11.5px; color:var(--ink-faint); font-weight:500; margin-bottom:3px; }
+    .ti a{ font-size:14px; font-weight:500; color:var(--ink); text-decoration:none; line-height:1.4; }
+    .ti a:hover{ color:var(--accent); }
+
+    .mini{ background:var(--surface); border-radius:14px; padding:15px 17px; height:100%;
+        box-shadow:0 1px 3px rgba(0,0,0,.04), 0 5px 18px rgba(0,0,0,.04); }
+    .mini .mm{ font-size:11.5px; color:var(--ink-faint); font-weight:500; margin-bottom:6px; }
+    .mini a{ font-family:'Newsreader',serif; font-size:15.5px; font-weight:500; color:var(--ink); text-decoration:none; line-height:1.35; }
+    .mini a:hover{ color:var(--accent); }
+
+    div[data-testid="stHorizontalBlock"]{ gap:18px; }
+    hr{ border-color:var(--hair); }
 </style>
 """, unsafe_allow_html=True)
 
@@ -1123,7 +1152,7 @@ def mostra_hub_legale(lista_articoli: List[Dict], tipo_bacheca: str):
     for art in lista_articoli:
         with st.container():
             e_letto = art.get('letto', False)
-            classe_card = "radar-card-letto" if e_letto else "radar-card"
+            classe_card = "radar-card letta" if e_letto else "radar-card"
             badge_nuovo = "" if e_letto else '<span class="badge-nuovo">Nuovo</span>'
             # Escape di tutti i testi: evita che contenuti con caratteri HTML (es. < > nel riassunto AI) rompano la card
             e_area = html.escape(str(art.get('area') or ''))
@@ -1131,21 +1160,20 @@ def mostra_hub_legale(lista_articoli: List[Dict], tipo_bacheca: str):
             e_titolo = html.escape(str(art.get('titolo') or ''))
             e_preview = html.escape(str(art.get('preview') or ''))
             e_link = html.escape(str(art.get('link') or ''), quote=True)
-            rango = art.get('tipo_fonte')
-            tag_rango = f'<span class="meta-tag tag-rango">{html.escape(str(rango))}</span>' if rango else ''
+            # Badge categoria pastello (Legge/Provvedimento/Sentenza/News)
+            sc = _stile_categoria(art.get('tipo_atto'))
+            badge_cat = f'<span class="cat-badge cat-{sc["cls_badge"]}">{sc["label"]}</span>'
             # Data dell'atto: la pubblicazione reale se disponibile, altrimenti la scansione
             data_rif = art.get('data_pubblicazione') or art.get('data_scansione')
             data_str = data_rif.strftime('%d/%m/%Y') if data_rif else ''
-            tag_data = f'<span class="meta-tag tag-rango">📅 {data_str}</span>' if data_str else ''
+            tag_data = f'<span class="meta-tag tag-rango">{data_str}</span>' if data_str else ''
             # Tag tema (dall'AI): se assente, ripiega sull'area manuale
             tema = art.get('tema') or art.get('area')
             tag_tema = f'<span class="meta-tag tag-area">{html.escape(str(tema))}</span>' if tema else ''
             # Badge rilevanza (solo priorità visiva, non nasconde nulla)
             rilevanza = art.get('rilevanza')
             if rilevanza == "alta":
-                badge_ril = '<span class="badge-ril badge-ril-alta">● Rilevanza alta</span>'
-            elif rilevanza == "media":
-                badge_ril = '<span class="badge-ril badge-ril-media">● Rilevanza media</span>'
+                badge_ril = '<span class="badge-ril badge-ril-alta">Alta</span>'
             else:
                 badge_ril = ''
             # Micro-riassunto AI sotto il titolo: dal DB, o da quello appena generato in sessione
@@ -1153,8 +1181,8 @@ def mostra_hub_legale(lista_articoli: List[Dict], tipo_bacheca: str):
             blocco_riassunto = f'<div class="card-microsummary">✦ {html.escape(str(riassunto))}</div>' if riassunto else ''
             card_html = (
                 f'<div class="{classe_card}">'
-                f'<div>{tag_tema}'
-                f'<span class="meta-tag tag-fonte">{e_fonte}</span>{tag_rango}{tag_data}{badge_ril}</div>'
+                f'<div>{badge_cat}{badge_ril}<span class="meta-tag tag-fonte">{e_fonte}</span>'
+                f'{tag_tema}{tag_data}</div>'
                 f'<a href="{e_link}" target="_blank" class="card-title">{e_titolo}{badge_nuovo}</a>'
                 f'{blocco_riassunto}'
                 f'<div class="card-preview">{e_preview}</div>'
@@ -1203,42 +1231,40 @@ def mostra_hub_legale(lista_articoli: List[Dict], tipo_bacheca: str):
                         # niente st.rerun(): mostro il risultato qui sotto, nello stesso ciclo
             # Se l'analisi esiste (appena generata o già presente), la mostro sotto la card
             if link in st.session_state.ai_summaries:
-                st.markdown("<div class='card-summary'>✦ Analisi strategica legal-tech</div>", unsafe_allow_html=True)
+                st.markdown("<div style='font-size:13px; font-weight:600; color:var(--accent); margin-top:6px;'>✦ Analisi strategica</div>", unsafe_allow_html=True)
                 st.markdown(st.session_state.ai_summaries[link])
             st.write("")
 
 def _stile_categoria(tipo_atto: Optional[str]) -> Dict[str, str]:
-    """Ritorna classe CSS, glifo ed etichetta per il trattamento grafico per categoria."""
+    """Ritorna classi CSS ed etichetta per categoria (badge pastello + thumb dashboard)."""
     t = (tipo_atto or "provvedimento").lower()
     if t == "legge":
-        return {"cls": "legge", "glyph": "§", "label": "Legge"}
+        return {"cls": "legge", "cls_badge": "legge", "glyph": "§", "label": "Legge"}
     if t == "sentenza":
-        return {"cls": "sent", "glyph": "⚖", "label": "Sentenza"}
+        return {"cls": "sent", "cls_badge": "sent", "glyph": "⚖", "label": "Sentenza"}
     if t == "news":
-        return {"cls": "news", "glyph": "▤", "label": "News"}
-    return {"cls": "provv", "glyph": "▣", "label": "Provvedimento"}
+        return {"cls": "news", "cls_badge": "news", "glyph": "▤", "label": "News"}
+    return {"cls": "provv", "cls_badge": "provv", "glyph": "▣", "label": "Provvedimento"}
 
 def _pp_card(art: Dict, lead: bool = False) -> str:
-    """Costruisce l'HTML di una card della prima pagina (apertura o griglia)."""
+    """Costruisce l'HTML di una card della prima pagina (griglia 'In evidenza')."""
     s = _stile_categoria(art.get('tipo_atto'))
     tema = html.escape(str(art.get('tema') or art.get('area') or 'Generale'))
     fonte = html.escape(str(art.get('fonte') or ''))
     titolo = html.escape(str(art.get('titolo') or ''))
     link = html.escape(str(art.get('link') or ''), quote=True)
     riassunto = html.escape(str(art.get('riassunto_ai') or art.get('preview') or ''))
-    badge = '<span class="badge-ril badge-ril-alta" style="margin-left:8px;">Alta</span>' if art.get('rilevanza') == 'alta' else ''
-    thumb_cls = "thumb-lead" if lead else ""
-    title_cls = "pp-title-lead" if lead else "pp-title-grid"
-    sum_cls = "pp-sum-lead" if lead else "pp-sum-grid"
+    badge_cat = f'<span class="cat-badge cat-{s["cls_badge"]}">{s["label"]}</span>'
+    badge_ril = '<span class="badge-ril badge-ril-alta" style="margin-left:7px;">Alta</span>' if art.get('rilevanza') == 'alta' else ''
+    data_rif = art.get('data_pubblicazione') or art.get('data_scansione')
+    data_str = data_rif.strftime('%d/%m') if data_rif else ''
     return (
         f'<div class="pp-card">'
-        f'<div class="thumb thumb-{s["cls"]} {thumb_cls}"><span class="glyph">{s["glyph"]}</span>'
-        f'<span class="src-chip">{fonte}</span></div>'
-        f'<div class="pp-body">'
-        f'<div class="pp-kicker-wrap"><span class="kicker k-{s["cls"]}">{s["label"]} · {tema}</span></div>'
-        f'<a href="{link}" target="_blank" class="pp-title {title_cls}">{titolo}{badge}</a>'
-        f'<div class="pp-sum {sum_cls}">{riassunto}</div>'
-        f'</div></div>'
+        f'<div>{badge_cat}{badge_ril}</div>'
+        f'<a href="{link}" target="_blank" class="pp-card-title">{titolo}</a>'
+        f'<div class="pp-card-sum">{riassunto}</div>'
+        f'<div class="pp-foot">{fonte} · {tema}{(" · " + data_str) if data_str else ""}</div>'
+        f'</div>'
     )
 
 def _semaforo_fonte(s: Dict) -> Tuple[str, str]:
@@ -1267,29 +1293,39 @@ if pagina_pulita not in ["⚙️ Gestione Fonti", "🏠 Dashboard"]:
 # --- ROUTING PAGINE ---
 if pagina_pulita == "🏠 Dashboard":
     oggi = datetime.now().strftime('%d/%m/%Y')
-    e_user = html.escape(str(st.session_state.user['username']))
-    masthead_html = (
-        '<div style="border-bottom:3px solid var(--brand); padding-bottom:14px; margin-bottom:6px; display:flex; align-items:flex-end; justify-content:space-between;">'
-        '<div style="font-family:\'Fraunces\',serif; font-weight:600; font-size:34px; letter-spacing:-0.5px; color:var(--ink);">'
-        'Legal Radar<span style="color:var(--brand);">.</span></div>'
-        '<div style="font-size:12px; text-transform:uppercase; letter-spacing:2px; color:var(--brand); font-weight:700;">Regulatory Intelligence</div>'
-        '</div>'
-        f'<div style="font-size:13px; color:var(--ink-soft); font-style:italic; margin-bottom:20px;">La tua prima pagina · {oggi}</div>'
-    )
-    st.markdown(masthead_html, unsafe_allow_html=True)
-
     in_evidenza = db.estrai_in_evidenza(st.session_state.user['id'], limite=4)
 
     # Stato vuoto curato (utile soprattutto dopo un reset a t0)
     if not in_evidenza:
+        st.markdown('<div class="pp-hero-eyebrow">La tua prima pagina</div>', unsafe_allow_html=True)
         st.info("Nessun articolo ancora in archivio. Lancia una sincronizzazione dalla barra laterale per popolare la prima pagina.")
     else:
-        # --- APERTURA + ULTIM'ORA ---
-        col_lead, col_ticker = st.columns([1.5, 1])
-        with col_lead:
-            st.markdown(_pp_card(in_evidenza[0], lead=True), unsafe_allow_html=True)
-        with col_ticker:
-            ultima_ora = db.estrai_ultima_ora(st.session_state.user['id'], limite=5)
+        # --- HERO: l'atto di apertura (più rilevante non letto) ---
+        top = in_evidenza[0]
+        sc_top = _stile_categoria(top.get('tipo_atto'))
+        e_titolo = html.escape(str(top.get('titolo') or ''))
+        e_link = html.escape(str(top.get('link') or ''), quote=True)
+        e_sum = html.escape(str(top.get('riassunto_ai') or top.get('preview') or ''))
+        e_tema = html.escape(str(top.get('tema') or top.get('area') or 'Generale'))
+        e_fonte = html.escape(str(top.get('fonte') or ''))
+        n_nuovi = len(in_evidenza)
+        badge_alta = '<span class="badge-ril badge-ril-alta">Rilevanza alta</span>' if top.get('rilevanza') == 'alta' else ''
+        hero_html = (
+            f'<div class="pp-hero-eyebrow">Aggiornato al {oggi}</div>'
+            f'<a href="{e_link}" target="_blank" class="pp-hero-title">{e_titolo}</a>'
+            f'<div class="pp-hero-sub">{e_sum}</div>'
+            f'<div class="pp-hero-row">'
+            f'<span class="cat-badge cat-{sc_top["cls_badge"]}">{sc_top["label"]}</span> '
+            f'{badge_alta} '
+            f'<span class="meta-tag tag-area">{e_tema} · {e_fonte}</span>'
+            f'</div>'
+        )
+        st.markdown(hero_html, unsafe_allow_html=True)
+        st.markdown("<hr>", unsafe_allow_html=True)
+
+        # --- ULTIM'ORA ---
+        ultima_ora = db.estrai_ultima_ora(st.session_state.user['id'], limite=5)
+        if ultima_ora:
             voci = ""
             for al in ultima_ora:
                 tm = html.escape(str(al.get('fonte') or ''))
@@ -1307,14 +1343,14 @@ if pagina_pulita == "🏠 Dashboard":
                 a_lk = html.escape(str(al.get('link') or ''), quote=True)
                 a_fn = html.escape(str(al.get('fonte') or ''))
                 voci_alert += (
-                    f'<div style="padding:7px 0; border-bottom:1px solid rgba(179,38,30,.15);">'
-                    f'<span style="font-size:10px; font-weight:700; color:var(--danger); text-transform:uppercase; letter-spacing:.5px;">⚠ {a_fn}</span> '
-                    f'<a href="{a_lk}" target="_blank" style="font-size:13.5px; font-weight:600; color:var(--ink); text-decoration:none;">{a_tt}</a>'
+                    f'<div style="padding:9px 0; border-bottom:1px solid rgba(232,84,63,.14);">'
+                    f'<span style="font-size:11px; font-weight:600; color:var(--alta); letter-spacing:.2px;">{a_fn}</span> '
+                    f'<a href="{a_lk}" target="_blank" style="font-size:14px; font-weight:500; color:var(--ink); text-decoration:none;">{a_tt}</a>'
                     f'</div>'
                 )
             st.markdown(
-                f'<div style="background:var(--danger-soft); border:1px solid rgba(179,38,30,.25); border-radius:8px; padding:12px 16px; margin-top:20px;">'
-                f'<div style="font-family:Fraunces,serif; font-size:14px; font-weight:600; color:var(--danger); margin-bottom:6px;">Alert del team</div>'
+                f'<div style="background:var(--alta-soft); border-radius:14px; padding:14px 18px; margin-top:22px;">'
+                f'<div style="font-size:13px; font-weight:600; color:var(--alta); margin-bottom:6px; letter-spacing:.2px;">Alert del team</div>'
                 f'{voci_alert}</div>',
                 unsafe_allow_html=True
             )
@@ -1322,8 +1358,7 @@ if pagina_pulita == "🏠 Dashboard":
         # --- GRIGLIA IN EVIDENZA (i successivi 3) ---
         secondari = in_evidenza[1:4]
         if secondari:
-            st.markdown('<div style="margin-top:28px;"></div>', unsafe_allow_html=True)
-            st.markdown('<div style="display:flex; align-items:center; gap:12px; margin-bottom:14px;"><h2 style="font-family:Fraunces,serif; font-size:20px; margin:0;">In evidenza</h2><span style="height:2px; background:linear-gradient(90deg,var(--brand-soft),transparent); flex:1;"></span></div>', unsafe_allow_html=True)
+            st.markdown('<div class="pp-section"><h2>In evidenza</h2></div>', unsafe_allow_html=True)
             cols = st.columns(len(secondari))
             for col, art in zip(cols, secondari):
                 with col:
@@ -1335,13 +1370,12 @@ if pagina_pulita == "🏠 Dashboard":
             articoli_tema = db.estrai_per_tema_blocco(st.session_state.user['id'], tema, limite=3)
             if not articoli_tema:
                 continue
-            st.markdown('<div style="margin-top:30px;"></div>', unsafe_allow_html=True)
-            st.markdown(f'<div style="display:flex; align-items:center; gap:12px; margin-bottom:14px;"><h2 style="font-family:Fraunces,serif; font-size:20px; margin:0;">{html.escape(str(tema))}</h2><span style="height:2px; background:linear-gradient(90deg,var(--brand-soft),transparent); flex:1;"></span></div>', unsafe_allow_html=True)
+            st.markdown(f'<div class="pp-section"><h2>{html.escape(str(tema))}</h2></div>', unsafe_allow_html=True)
             cols = st.columns(len(articoli_tema))
             for col, art in zip(cols, articoli_tema):
                 with col:
                     s = _stile_categoria(art.get('tipo_atto'))
-                    mm = html.escape(f"{art.get('fonte','')} · {s['label'].lower()}")
+                    mm = html.escape(f"{art.get('fonte','')} · {s['label']}")
                     tt = html.escape(str(art.get('titolo') or ''))
                     lk = html.escape(str(art.get('link') or ''), quote=True)
                     st.markdown(f'<div class="mini"><div class="mm">{mm}</div><a href="{lk}" target="_blank">{tt}</a></div>', unsafe_allow_html=True)
