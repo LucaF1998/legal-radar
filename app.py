@@ -442,8 +442,9 @@ class LegalRadarDB:
         return [dict(a) for a in articoli]
 
     def estrai_per_tipo_atto(self, tipo_atto: str, user_id: int, ricerca_testo: str = "",
-                             tema: Optional[str] = None, limite: int = 100) -> List[Dict]:
-        """Estrae articoli per categoria AI (sentenza/provvedimento/news), con filtro tema opzionale,
+                             tema: Optional[str] = None, fonti: Optional[List[str]] = None,
+                             limite: int = 100) -> List[Dict]:
+        """Estrae articoli per categoria AI (sentenza/provvedimento/news), con filtro tema e fonte opzionali,
         rispettando le fonti spente dall'utente e portando stato letto + tipo fonte."""
         query = """
             SELECT a.*, COALESCE(uas.letto, FALSE) AS letto, src.tipo_fonte,
@@ -469,6 +470,11 @@ class LegalRadarDB:
         if tema:
             query += " AND a.tema = %s"
             params.append(tema)
+        if fonti:
+            # Filtro per una o più fonti selezionate nella sessione corrente
+            placeholders = ", ".join(["%s"] * len(fonti))
+            query += f" AND a.fonte IN ({placeholders})"
+            params.extend(fonti)
         if ricerca_testo:
             query += " AND (a.titolo ILIKE %s OR a.preview ILIKE %s OR a.area ILIKE %s)"
             text_param = f"%{ricerca_testo}%"
@@ -480,18 +486,43 @@ class LegalRadarDB:
             articoli = cur.fetchall()
         return [dict(a) for a in articoli]
 
+    def lista_fonti_per_tipo(self, tipo_atto: str, user_id: int) -> List[str]:
+        """Fonti che hanno almeno un articolo della categoria data (per popolare il filtro fonte),
+        escludendo quelle spente dall'utente."""
+        query = """
+            SELECT DISTINCT a.fonte
+            FROM articles a
+            LEFT JOIN sources src ON src.nome = a.fonte
+            WHERE CASE
+                      WHEN LOWER(COALESCE(src.tipo_fonte,'')) = 'editoriale' THEN 'news'
+                      ELSE COALESCE(a.tipo_atto, 'provvedimento')
+                  END = %s
+            AND a.fonte IS NOT NULL
+            AND a.fonte NOT IN (
+                SELECT s.nome FROM sources s
+                JOIN user_source_preferences usp ON s.id = usp.source_id
+                WHERE usp.user_id = %s AND usp.is_active = FALSE
+            )
+            ORDER BY a.fonte ASC
+        """
+        with self.get_cursor() as cur:
+            cur.execute(query, (tipo_atto, user_id))
+            return [r[0] for r in cur.fetchall()]
+
     def lista_temi(self, tipo_atto: Optional[str] = None) -> List[str]:
-        """Elenco dei temi presenti in archivio (per popolare il filtro)."""
+        """Elenco dei temi presenti in archivio, normalizzati e deduplicati (per il filtro)."""
         if tipo_atto:
-            query = "SELECT DISTINCT tema FROM articles WHERE tema IS NOT NULL AND tipo_atto = %s ORDER BY tema ASC"
+            query = "SELECT DISTINCT tema FROM articles WHERE tema IS NOT NULL AND tipo_atto = %s"
             args = (tipo_atto,)
         else:
-            query = "SELECT DISTINCT tema FROM articles WHERE tema IS NOT NULL ORDER BY tema ASC"
+            query = "SELECT DISTINCT tema FROM articles WHERE tema IS NOT NULL"
             args = ()
         with self.get_cursor() as cur:
             cur.execute(query, args)
             righe = cur.fetchall()
-        return [r[0] for r in righe]
+        # Normalizzo e deduplico: le varianti collassano sulla forma canonica
+        temi = sorted({normalizza_tema(r[0]) for r in righe})
+        return temi
 
     # --- METODI PER LA DASHBOARD "PRIMA PAGINA" ---
     def _filtro_fonti_attive(self, user_id: int) -> str:
@@ -552,19 +583,23 @@ class LegalRadarDB:
         return [dict(r) for r in righe]
 
     def temi_piu_presenti(self, user_id: int, limite: int = 3) -> List[str]:
-        """I temi con più articoli (per scegliere quali blocchi tematici mostrare)."""
+        """I temi (normalizzati) con più articoli, per scegliere i blocchi tematici della dashboard."""
         query = f"""
             SELECT a.tema, COUNT(*) AS n
             FROM articles a
             WHERE a.tema IS NOT NULL AND {self._filtro_fonti_attive(user_id)}
             GROUP BY a.tema
-            ORDER BY n DESC
-            LIMIT %s
         """
         with self.get_cursor(dict_cursor=True) as cur:
-            cur.execute(query, (user_id, limite))
+            cur.execute(query, (user_id,))
             righe = cur.fetchall()
-        return [r['tema'] for r in righe]
+        # Accorpo i conteggi sulle forme canoniche (le varianti si sommano)
+        conteggi: Dict[str, int] = {}
+        for r in righe:
+            canon = normalizza_tema(r['tema'])
+            conteggi[canon] = conteggi.get(canon, 0) + r['n']
+        ordinati = sorted(conteggi.items(), key=lambda x: x[1], reverse=True)
+        return [t for t, _ in ordinati[:limite]]
 
     def aggiungi_bookmark(self, user_id: int, article_id: int) -> None:
         try:
@@ -1192,7 +1227,8 @@ def _classifica_con_fallback(meta: Dict, fonte: Dict) -> Dict:
         categoria = "news"
     else:
         categoria = meta.get("categoria") or "provvedimento"  # fallback sicuro per atti ufficiali
-    tema = meta.get("tema") or fonte.get('area') or "Generale"
+    # Normalizzo il tema all'origine: i nuovi articoli entrano già con la forma canonica
+    tema = normalizza_tema(meta.get("tema") or fonte.get('area'))
     return {
         "riassunto": meta.get("riassunto"),
         "rilevanza": meta.get("rilevanza") or "media",
@@ -1200,6 +1236,34 @@ def _classifica_con_fallback(meta: Dict, fonte: Dict) -> Dict:
         "tema": tema,
         "titolo": meta.get("titolo"),
     }
+
+def normalizza_tema(tema: Optional[str]) -> str:
+    """Riconduce le varianti di tema (campo libero dell'AI) a un insieme canonico.
+    Risolve i doppioni nei menu (es. 'Privacy', 'privacy ', 'Privacy e protezione dati' -> 'Privacy').
+    Usata sia in lettura (app) sia dal backfill che consolida lo storico nel DB."""
+    if not tema or not str(tema).strip():
+        return "Generale"
+    t = str(tema).strip().lower()
+    # Mappa di sinonimi -> forma canonica. Il match è "contiene la chiave".
+    regole = [
+        (("privacy", "protezione dei dati", "protezione dati", "data protection", "gdpr", "dati personali"), "Privacy"),
+        (("cyber", "sicurezza informatica", "nis2", "nis 2"), "Cybersecurity"),
+        (("assicurat", "ivass", "polizz"), "Assicurativo"),
+        (("banc", "finanziar", "credito", "consob", "pagam: ", "pagament"), "Bancario e finanziario"),
+        (("tribut", "fiscal", "imposta", "agenzia delle entrate"), "Tributario"),
+        (("consumat", "pratiche commerciali", "agcm", "antitrust"), "Consumatori e pratiche commerciali"),
+        (("concorrenz", "competition"), "Concorrenza"),
+        (("intelligenza artificiale", "ai act", "ia ", "machine learning"), "Intelligenza artificiale"),
+        (("telemarket", "marketing"), "Telemarketing e marketing"),
+    ]
+    for chiavi, canonico in regole:
+        if any(k in t for k in chiavi):
+            return canonico
+    # Voci troppo generiche -> "Generale"
+    if t in ("diritto", "generale", "varie", "altro", "n/d", "nd", "null", "none"):
+        return "Generale"
+    # Altrimenti: forma con iniziale maiuscola, ripulita
+    return str(tema).strip().capitalize()
 
 def pulisci_titolo(titolo: str) -> str:
     """Normalizza i titoli sporchi dei feed istituzionali.
@@ -1878,20 +1942,30 @@ elif pagina_pulita in ["📖 Leggi", "🏛️ Provvedimenti", "⚖️ Sentenze",
             db.segna_tutti_letti(st.session_state.user['id'])
             st.rerun()
 
-    # Filtro per tema (popolato dai temi realmente presenti in questa categoria)
+    # Filtri per tema e per fonte, affiancati
+    col_t, col_f = st.columns(2)
     temi_disponibili = db.lista_temi(tipo_atto)
     tema_sel = None
-    if temi_disponibili:
-        scelta_tema = st.selectbox("Filtra per tema", ["Tutti i temi"] + temi_disponibili, key=f"tema_{tipo_atto}")
-        if scelta_tema != "Tutti i temi":
-            tema_sel = scelta_tema
+    with col_t:
+        if temi_disponibili:
+            scelta_tema = st.selectbox("Filtra per tema", ["Tutti i temi"] + temi_disponibili, key=f"tema_{tipo_atto}")
+            if scelta_tema != "Tutti i temi":
+                tema_sel = scelta_tema
+    fonti_disponibili = db.lista_fonti_per_tipo(tipo_atto, st.session_state.user['id'])
+    fonti_sel = None
+    with col_f:
+        if fonti_disponibili:
+            scelta_fonti = st.multiselect("Filtra per fonte", fonti_disponibili, key=f"fonti_{tipo_atto}",
+                                          placeholder="Tutte le fonti")
+            if scelta_fonti:
+                fonti_sel = scelta_fonti
 
     # --- PAGINAZIONE "CARICA ALTRI" ---
     PAGINA_DIM = 25
     if 'paginazione' not in st.session_state:
         st.session_state.paginazione = {}
     # La chiave di contesto include sezione + filtri: se cambiano, il contatore riparte
-    ctx_key = f"{tipo_atto}|{tema_sel or ''}|{ricerca or ''}"
+    ctx_key = f"{tipo_atto}|{tema_sel or ''}|{','.join(fonti_sel) if fonti_sel else ''}|{ricerca or ''}"
     stato_pag = st.session_state.paginazione
     if stato_pag.get('ctx') != ctx_key:
         stato_pag['ctx'] = ctx_key
@@ -1901,7 +1975,7 @@ elif pagina_pulita in ["📖 Leggi", "🏛️ Provvedimenti", "⚖️ Sentenze",
     # Chiedo un articolo in più del necessario: se arriva, esiste un'altra pagina
     dati_db = db.estrai_per_tipo_atto(
         tipo_atto, st.session_state.user['id'],
-        ricerca_testo=ricerca, tema=tema_sel, limite=limite_corrente + 1
+        ricerca_testo=ricerca, tema=tema_sel, fonti=fonti_sel, limite=limite_corrente + 1
     )
     ci_sono_altri = len(dati_db) > limite_corrente
     mostra_hub_legale(dati_db[:limite_corrente], tipo_bacheca="radar")
