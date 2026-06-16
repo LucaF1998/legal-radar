@@ -139,6 +139,39 @@ class LegalRadarDB:
                                   ('scadenza'), ('obbligo'), ('divieto'), ('sentenza')) AS v(k)
             WHERE NOT EXISTS (SELECT 1 FROM alert_keywords)
             """,
+            # --- INTEGRAZIONE RADAR (Fase 1): tabella dedicata ai report ricchi del Radar ---
+            """
+            CREATE TABLE IF NOT EXISTS legal_radar_reports (
+                id SERIAL PRIMARY KEY,
+                id_report TEXT UNIQUE NOT NULL,
+                data_report DATE,
+                area TEXT,
+                tag VARCHAR(10),
+                titolo TEXT NOT NULL,
+                livello_rischio VARCHAR(10),
+                score_rischio VARCHAR(10),
+                fatto_nuovo TEXT,
+                scadenza TEXT,
+                sintesi TEXT,
+                analisi TEXT,
+                impatto TEXT,
+                action_point TEXT,
+                riferimenti TEXT,
+                fonte_ufficiale TEXT,
+                link_documento TEXT,
+                link_fonti TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+            """,
+            "CREATE INDEX IF NOT EXISTS idx_lrr_data ON legal_radar_reports(data_report DESC)",
+            # Banner: collegamento manuale notizia RSS (articles) <-> report (legal_radar_reports)
+            """
+            CREATE TABLE IF NOT EXISTS report_links (
+                article_id INTEGER REFERENCES articles(id) ON DELETE CASCADE,
+                report_id INTEGER REFERENCES legal_radar_reports(id) ON DELETE CASCADE,
+                PRIMARY KEY (article_id, report_id)
+            )
+            """,
         )
         try:
             with self.get_cursor() as cur:
@@ -605,6 +638,56 @@ class LegalRadarDB:
         with self.get_cursor() as cur:
             cur.execute("DELETE FROM alert_keywords WHERE id = %s", (keyword_id,))
 
+    # --- REPORT DEL RADAR (Fase 1: vetrina dei report mattutini) ---
+    def estrai_report_radar(self, ricerca_testo: str = "", limite: int = 100) -> List[Dict]:
+        """Legge i report ricchi inviati dal Radar, dal più recente."""
+        query = "SELECT * FROM legal_radar_reports"
+        params: List = []
+        if ricerca_testo:
+            query += " WHERE (titolo ILIKE %s OR sintesi ILIKE %s OR area ILIKE %s OR analisi ILIKE %s)"
+            tp = f"%{ricerca_testo}%"
+            params.extend([tp, tp, tp, tp])
+        query += " ORDER BY data_report DESC, created_at DESC LIMIT %s"
+        params.append(limite)
+        with self.get_cursor(dict_cursor=True) as cur:
+            cur.execute(query, params)
+            righe = cur.fetchall()
+        return [dict(r) for r in righe]
+
+    def conta_report_radar(self) -> int:
+        with self.get_cursor() as cur:
+            cur.execute("SELECT COUNT(*) FROM legal_radar_reports")
+            return cur.fetchone()[0]
+
+    def lista_report_per_collegamento(self, limite: int = 50) -> List[Dict]:
+        """Report recenti, in forma compatta, per popolare il selettore del banner."""
+        with self.get_cursor(dict_cursor=True) as cur:
+            cur.execute("SELECT id, titolo, data_report FROM legal_radar_reports ORDER BY data_report DESC, created_at DESC LIMIT %s", (limite,))
+            return [dict(r) for r in cur.fetchall()]
+
+    def collega_articolo_report(self, article_id: int, report_id: int) -> None:
+        with self.get_cursor() as cur:
+            cur.execute(
+                "INSERT INTO report_links (article_id, report_id) VALUES (%s, %s) ON CONFLICT DO NOTHING",
+                (article_id, report_id)
+            )
+
+    def scollega_articolo_report(self, article_id: int, report_id: int) -> None:
+        with self.get_cursor() as cur:
+            cur.execute("DELETE FROM report_links WHERE article_id = %s AND report_id = %s", (article_id, report_id))
+
+    def report_collegati_a_articolo(self, article_id: int) -> List[Dict]:
+        """Report collegati a una notizia RSS (per mostrare il banner di rimando)."""
+        with self.get_cursor(dict_cursor=True) as cur:
+            cur.execute("""
+                SELECT r.id, r.titolo, r.data_report
+                FROM legal_radar_reports r
+                JOIN report_links rl ON rl.report_id = r.id
+                WHERE rl.article_id = %s
+                ORDER BY r.data_report DESC
+            """, (article_id,))
+            return [dict(r) for r in cur.fetchall()]
+
     # Gli alert usano le keyword della tabella ed escludono le fonti spente dall'utente
     def estrai_ultimi_alert_urgenti(self, user_id: int, limite: int = 4) -> List[Dict]:
         kw = [k['keyword'] for k in self.lista_keywords_alert()]
@@ -826,6 +909,27 @@ st.markdown("""
 
     div[data-testid="stHorizontalBlock"]{ gap:18px; }
     hr{ border-color:var(--hair); }
+
+    /* ---- REPORT RICCHI DEL RADAR ---- */
+    .report-card{ background:var(--surface); border-radius:18px; padding:26px 30px;
+        box-shadow:0 1px 3px rgba(0,0,0,.04), 0 8px 28px rgba(0,0,0,.05); margin-bottom:18px; }
+    .report-title{ font-family:'Newsreader',serif; font-weight:600; font-size:25px; line-height:1.25;
+        letter-spacing:-0.3px; color:var(--ink); margin-top:4px; }
+    .report-sec{ margin-top:18px; }
+    .report-sec-h{ font-size:11.5px; font-weight:700; letter-spacing:.6px; text-transform:uppercase;
+        color:var(--accent); margin-bottom:6px; }
+    .report-sec-b{ font-size:15px; line-height:1.62; color:var(--ink-soft); }
+    .report-link{ font-size:14px; font-weight:500; color:var(--accent); text-decoration:none; }
+    .report-link:hover{ text-decoration:underline; }
+    .rk{ display:inline-block; font-size:11.5px; font-weight:600; padding:4px 11px; border-radius:980px; margin-right:7px; }
+    .rk-alto{ background:var(--alta-soft); color:var(--alta); }
+    .rk-medio{ background:#fdf2e3; color:#9a6712; }
+    .rk-basso{ background:#e9f4ee; color:#1f7a52; }
+    .rk-certo{ background:#eaf0f7; color:#2c4a6e; }
+    .rk-segnale{ background:rgba(0,0,0,.05); color:var(--ink-soft); }
+    /* banner di rimando al report sulle card RSS */
+    .report-banner{ background:var(--accent-soft); border-radius:12px; padding:11px 15px; margin-top:11px;
+        font-size:13.5px; color:var(--accent); font-weight:500; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -1156,6 +1260,7 @@ with st.sidebar:
 
     opzioni_nav = [
         "🏠 Dashboard",
+        "📨 Report Radar",
         "📖 Leggi",
         "🏛️ Provvedimenti",
         "⚖️ Sentenze",
@@ -1259,6 +1364,37 @@ def mostra_hub_legale(lista_articoli: List[Dict], tipo_bacheca: str):
             if link in st.session_state.ai_summaries:
                 st.markdown("<div style='font-size:13px; font-weight:600; color:var(--accent); margin-top:6px;'>✦ Analisi strategica</div>", unsafe_allow_html=True)
                 st.markdown(st.session_state.ai_summaries[link])
+
+            # Banner di rimando ai report del Radar collegati a questa notizia
+            if tipo_bacheca != "bookmarks":
+                collegati = db.report_collegati_a_articolo(art['id'])
+                for rc in collegati:
+                    dt = rc['data_report'].strftime('%d/%m/%Y') if rc.get('data_report') else ''
+                    st.markdown(
+                        f'<div class="report-banner">📨 C\'è un report del Legal Radar su questo tema: '
+                        f'<b>{html.escape(str(rc["titolo"]))}</b>{(" · " + dt) if dt else ""}</div>',
+                        unsafe_allow_html=True
+                    )
+                # Controllo di collegamento riservato agli admin
+                if st.session_state.user.get('role') == 'admin':
+                    with st.expander("🔗 Collega a un report Legal Radar"):
+                        opzioni_rep = db.lista_report_per_collegamento()
+                        if not opzioni_rep:
+                            st.caption("Nessun report disponibile da collegare.")
+                        else:
+                            id_collegati = {rc['id'] for rc in collegati}
+                            mappa = {f"{r['titolo'][:70]} ({r['data_report'].strftime('%d/%m/%Y') if r.get('data_report') else '—'})": r['id'] for r in opzioni_rep}
+                            scelta = st.selectbox("Report", list(mappa.keys()), key=f"sel_rep_{art['id']}", label_visibility="collapsed")
+                            rid = mappa[scelta]
+                            cc1, cc2 = st.columns(2)
+                            if rid not in id_collegati:
+                                if cc1.button("Collega", key=f"link_{art['id']}_{rid}"):
+                                    db.collega_articolo_report(art['id'], rid)
+                                    st.rerun()
+                            else:
+                                if cc1.button("Scollega", key=f"unlink_{art['id']}_{rid}"):
+                                    db.scollega_articolo_report(art['id'], rid)
+                                    st.rerun()
             st.write("")
 
 def _stile_categoria(tipo_atto: Optional[str]) -> Dict[str, str]:
@@ -1292,6 +1428,85 @@ def _pp_card(art: Dict, lead: bool = False) -> str:
         f'<div class="pp-foot">{fonte} · {tema}{(" · " + data_str) if data_str else ""}</div>'
         f'</div>'
     )
+
+def _rischio_badge(livello: Optional[str]) -> str:
+    """Badge colorato per il livello di rischio del report."""
+    l = (livello or "").upper()
+    if l == "ALTO":
+        return '<span class="rk rk-alto">Rischio alto</span>'
+    if l == "MEDIO":
+        return '<span class="rk rk-medio">Rischio medio</span>'
+    if l == "BASSO":
+        return '<span class="rk rk-basso">Rischio basso</span>'
+    return ''
+
+def mostra_report_radar(report: List[Dict]) -> None:
+    """Renderizza i report ricchi del Radar in stile 'report' (non elenco-link)."""
+    if not report:
+        st.info("Nessun report del Legal Radar ancora ricevuto. I report mattutini compariranno qui dopo l'invio dal Radar.")
+        return
+    for r in report:
+        tag = (r.get('tag') or '').upper()
+        tag_badge = ''
+        if tag == 'CERTO':
+            tag_badge = '<span class="rk rk-certo">Certo</span>'
+        elif tag == 'SEGNALE':
+            tag_badge = '<span class="rk rk-segnale">Segnale</span>'
+        data_str = r['data_report'].strftime('%d/%m/%Y') if r.get('data_report') else ''
+        e_area = html.escape(str(r.get('area') or ''))
+        e_tit = html.escape(str(r.get('titolo') or ''))
+        score = html.escape(str(r.get('score_rischio') or ''))
+        rk = _rischio_badge(r.get('livello_rischio'))
+        score_txt = f'<span class="meta-tag tag-rango">{score}</span>' if score else ''
+        data_badge = f'<span class="meta-tag tag-rango">{data_str}</span>' if data_str else ''
+        intestazione = (
+            f'<div class="report-card">'
+            f'<div style="margin-bottom:10px;">{tag_badge}{rk}{score_txt}'
+            f'<span class="meta-tag tag-area">{e_area}</span>{data_badge}</div>'
+            f'<div class="report-title">{e_tit}</div>'
+        )
+        st.markdown(intestazione, unsafe_allow_html=True)
+
+        # Sezioni ricche: ognuna mostrata solo se valorizzata
+        def blocco(label, valore, righe=False):
+            if not valore:
+                return
+            v = html.escape(str(valore))
+            if righe:
+                v = "<br>".join(f"• {l}" for l in str(valore).split("\n") if l.strip())
+                v = v  # già escapato a monte? no: escapo i singoli
+                v = "<br>".join(f"• {html.escape(l)}" for l in str(valore).split("\n") if l.strip())
+            else:
+                v = v.replace("\n\n", "<br><br>").replace("\n", "<br>")
+            st.markdown(
+                f'<div class="report-sec"><div class="report-sec-h">{label}</div>'
+                f'<div class="report-sec-b">{v}</div></div>',
+                unsafe_allow_html=True
+            )
+
+        if r.get('fatto_nuovo'):
+            blocco("Fatto nuovo", r.get('fatto_nuovo'))
+        if r.get('sintesi'):
+            blocco("Sintesi", r.get('sintesi'))
+        if r.get('analisi'):
+            blocco("Analisi giuridica", r.get('analisi'))
+        if r.get('impatto'):
+            blocco("Impatto di settore", r.get('impatto'))
+        if r.get('action_point'):
+            blocco("Action point", r.get('action_point'), righe=True)
+        if r.get('scadenza'):
+            blocco("Scadenza", r.get('scadenza'))
+        if r.get('riferimenti'):
+            blocco("Riferimenti normativi", r.get('riferimenti'))
+
+        # Fonti e documento ufficiale come link
+        link_doc = r.get('link_documento')
+        if link_doc and str(link_doc).upper() != "N/D" and str(link_doc).startswith("http"):
+            ld = html.escape(str(link_doc), quote=True)
+            fonte_uff = html.escape(str(r.get('fonte_ufficiale') or 'Documento ufficiale'))
+            st.markdown(f'<div class="report-sec"><a href="{ld}" target="_blank" class="report-link">↗ {fonte_uff}</a></div>', unsafe_allow_html=True)
+        st.markdown('</div>', unsafe_allow_html=True)
+        st.write("")
 
 def _semaforo_fonte(s: Dict) -> Tuple[str, str]:
     """Calcola il semaforo di salute di una fonte.
@@ -1405,6 +1620,13 @@ if pagina_pulita == "🏠 Dashboard":
                     tt = html.escape(str(art.get('titolo') or ''))
                     lk = html.escape(str(art.get('link') or ''), quote=True)
                     st.markdown(f'<div class="mini"><div class="mm">{mm}</div><a href="{lk}" target="_blank">{tt}</a></div>', unsafe_allow_html=True)
+
+elif pagina_pulita == "📨 Report Radar":
+    col_h, _ = st.columns([3, 1])
+    col_h.header("Report del Legal Radar")
+    st.caption("I report mattutini ricevuti dal motore di intelligence del Radar, nel loro formato completo.")
+    report = db.estrai_report_radar(ricerca_testo=ricerca)
+    mostra_report_radar(report)
 
 elif pagina_pulita in ["📖 Leggi", "🏛️ Provvedimenti", "⚖️ Sentenze", "📰 News"]:
     # Mappa la voce di menu alla categoria
