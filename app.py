@@ -676,6 +676,12 @@ class LegalRadarDB:
         with self.get_cursor() as cur:
             cur.execute("DELETE FROM report_links WHERE article_id = %s AND report_id = %s", (article_id, report_id))
 
+    def elimina_report_radar(self, report_id: int) -> None:
+        """Elimina un report del Radar. I collegamenti in report_links vengono rimossi
+        automaticamente dal vincolo ON DELETE CASCADE."""
+        with self.get_cursor() as cur:
+            cur.execute("DELETE FROM legal_radar_reports WHERE id = %s", (report_id,))
+
     def report_collegati_a_articolo(self, article_id: int) -> List[Dict]:
         """Report collegati a una notizia RSS (per mostrare il banner di rimando)."""
         with self.get_cursor(dict_cursor=True) as cur:
@@ -1506,6 +1512,15 @@ def mostra_report_radar(report: List[Dict]) -> None:
             fonte_uff = html.escape(str(r.get('fonte_ufficiale') or 'Documento ufficiale'))
             st.markdown(f'<div class="report-sec"><a href="{ld}" target="_blank" class="report-link">↗ {fonte_uff}</a></div>', unsafe_allow_html=True)
         st.markdown('</div>', unsafe_allow_html=True)
+
+        # Eliminazione riservata agli admin, con conferma esplicita
+        if st.session_state.user.get('role') == 'admin':
+            rid = r['id']
+            with st.expander("🗑️ Elimina report"):
+                conferma = st.checkbox("Confermo l'eliminazione di questo report", key=f"confdel_rep_{rid}")
+                if st.button("Elimina definitivamente", key=f"del_rep_{rid}", disabled=not conferma):
+                    db.elimina_report_radar(rid)
+                    st.rerun()
         st.write("")
 
 def _semaforo_fonte(s: Dict) -> Tuple[str, str]:
