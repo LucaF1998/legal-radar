@@ -443,8 +443,8 @@ class LegalRadarDB:
 
     def estrai_per_tipo_atto(self, tipo_atto: str, user_id: int, ricerca_testo: str = "",
                              tema: Optional[str] = None, fonti: Optional[List[str]] = None,
-                             limite: int = 100) -> List[Dict]:
-        """Estrae articoli per categoria AI (sentenza/provvedimento/news), con filtro tema e fonte opzionali,
+                             giorni: Optional[int] = None, limite: int = 100) -> List[Dict]:
+        """Estrae articoli per categoria AI (sentenza/provvedimento/news), con filtro tema, fonte e data opzionali,
         rispettando le fonti spente dall'utente e portando stato letto + tipo fonte."""
         query = """
             SELECT a.*, COALESCE(uas.letto, FALSE) AS letto, src.tipo_fonte,
@@ -475,6 +475,10 @@ class LegalRadarDB:
             placeholders = ", ".join(["%s"] * len(fonti))
             query += f" AND a.fonte IN ({placeholders})"
             params.extend(fonti)
+        if giorni:
+            # Filtro temporale sulla data dell'atto (pubblicazione reale, o scansione come fallback)
+            query += " AND COALESCE(a.data_pubblicazione, a.data_scansione) >= NOW() - (INTERVAL '1 day' * %s)"
+            params.append(giorni)
         if ricerca_testo:
             query += " AND (a.titolo ILIKE %s OR a.preview ILIKE %s OR a.area ILIKE %s)"
             text_param = f"%{ricerca_testo}%"
@@ -508,6 +512,40 @@ class LegalRadarDB:
         with self.get_cursor() as cur:
             cur.execute(query, (tipo_atto, user_id))
             return [r[0] for r in cur.fetchall()]
+
+    def ricerca_globale(self, user_id: int, testo: str, limite: int = 40) -> Dict[str, List[Dict]]:
+        """Cerca lo stesso testo su articoli e report del Radar. Ritorna due liste separate.
+        Rispetta le fonti spente dall'utente per gli articoli."""
+        if not testo or not testo.strip():
+            return {"articoli": [], "report": []}
+        tp = f"%{testo.strip()}%"
+        # Articoli
+        q_art = f"""
+            SELECT a.*, COALESCE(uas.letto, FALSE) AS letto, src.tipo_fonte,
+                   CASE WHEN LOWER(COALESCE(src.tipo_fonte,'')) = 'editoriale' THEN 'news'
+                        ELSE COALESCE(a.tipo_atto, 'provvedimento') END AS tipo_atto_eff
+            FROM articles a
+            LEFT JOIN user_article_status uas ON uas.article_id = a.id AND uas.user_id = %s
+            LEFT JOIN sources src ON src.nome = a.fonte
+            WHERE (a.titolo ILIKE %s OR a.preview ILIKE %s OR a.area ILIKE %s OR a.riassunto_ai ILIKE %s)
+            AND {self._filtro_fonti_attive(user_id)}
+            ORDER BY COALESCE(a.data_pubblicazione, a.data_scansione) DESC LIMIT %s
+        """
+        # Report del Radar
+        q_rep = """
+            SELECT r.*, (urs.report_id IS NOT NULL) AS letto, (rb.report_id IS NOT NULL) AS salvato
+            FROM legal_radar_reports r
+            LEFT JOIN user_report_status urs ON urs.report_id = r.id AND urs.user_id = %s
+            LEFT JOIN report_bookmarks rb ON rb.report_id = r.id AND rb.user_id = %s
+            WHERE (r.titolo ILIKE %s OR r.sintesi ILIKE %s OR r.area ILIKE %s OR r.analisi ILIKE %s)
+            ORDER BY r.data_report DESC, r.created_at DESC LIMIT %s
+        """
+        with self.get_cursor(dict_cursor=True) as cur:
+            cur.execute(q_art, (user_id, tp, tp, tp, tp, user_id, limite))
+            articoli = [dict(a) for a in cur.fetchall()]
+            cur.execute(q_rep, (user_id, user_id, tp, tp, tp, tp, limite))
+            report = [dict(r) for r in cur.fetchall()]
+        return {"articoli": articoli, "report": report}
 
     def lista_temi(self, tipo_atto: Optional[str] = None) -> List[str]:
         """Elenco dei temi presenti in archivio, normalizzati e deduplicati (per il filtro)."""
@@ -1462,6 +1500,7 @@ with st.sidebar:
 
     opzioni_nav = [
         "🏠 Dashboard",
+        "🔎 Cerca",
         "📨 Report Radar",
         "📖 Leggi",
         "🏛️ Provvedimenti",
@@ -1768,11 +1807,33 @@ def _semaforo_fonte(s: Dict) -> Tuple[str, str]:
 pagina_pulita = re.sub(r"\s*\(\d+\)$", "", pagina)
 
 ricerca = ""
-if pagina_pulita not in ["⚙️ Gestione Fonti", "🏠 Dashboard"]:
+if pagina_pulita not in ["⚙️ Gestione Fonti", "🏠 Dashboard", "🔎 Cerca"]:
     ricerca = st.text_input("🔍 Cerca parole chiave nell'archivio storico...")
 
 # --- ROUTING PAGINE ---
-if pagina_pulita == "🏠 Dashboard":
+if pagina_pulita == "🔎 Cerca":
+    st.header("Ricerca")
+    st.caption("Cerca in tutto l'archivio: articoli e report del Radar insieme.")
+    q = st.text_input("Cosa cerchi?", placeholder="es. telemarketing, sanzione, AI Act…", key="ricerca_globale_input")
+    if not q or not q.strip():
+        st.info("Digita una o più parole per cercare tra articoli e report.")
+    else:
+        risultati = db.ricerca_globale(st.session_state.user['id'], q)
+        n_art = len(risultati["articoli"])
+        n_rep = len(risultati["report"])
+        if n_art == 0 and n_rep == 0:
+            st.warning(f"Nessun risultato per «{q}».")
+        else:
+            st.caption(f"{n_art} articoli · {n_rep} report trovati")
+            if n_rep:
+                st.subheader("Report del Radar")
+                st.session_state['report_bacheca'] = "sezione"
+                mostra_report_radar(risultati["report"])
+            if n_art:
+                st.subheader("Articoli")
+                mostra_hub_legale(risultati["articoli"], tipo_bacheca="radar")
+
+elif pagina_pulita == "🏠 Dashboard":
     oggi = datetime.now().strftime('%d/%m/%Y')
     in_evidenza = db.estrai_in_evidenza(st.session_state.user['id'], limite=4)
 
@@ -1858,6 +1919,9 @@ if pagina_pulita == "🏠 Dashboard":
                         f'</div>',
                         unsafe_allow_html=True
                     )
+                    if st.button("Apri nei Report Radar →", key=f"open_rep_{rep['id']}", use_container_width=True):
+                        st.session_state['nav_pagina'] = "📨 Report Radar"
+                        st.rerun()
 
         # --- GRIGLIA IN EVIDENZA (i successivi 3) ---
         secondari = in_evidenza[1:4]
@@ -1942,8 +2006,8 @@ elif pagina_pulita in ["📖 Leggi", "🏛️ Provvedimenti", "⚖️ Sentenze",
             db.segna_tutti_letti(st.session_state.user['id'])
             st.rerun()
 
-    # Filtri per tema e per fonte, affiancati
-    col_t, col_f = st.columns(2)
+    # Filtri per tema, fonte e periodo, affiancati
+    col_t, col_f, col_d = st.columns(3)
     temi_disponibili = db.lista_temi(tipo_atto)
     tema_sel = None
     with col_t:
@@ -1959,13 +2023,17 @@ elif pagina_pulita in ["📖 Leggi", "🏛️ Provvedimenti", "⚖️ Sentenze",
                                           placeholder="Tutte le fonti")
             if scelta_fonti:
                 fonti_sel = scelta_fonti
+    with col_d:
+        opzioni_periodo = {"Sempre": None, "Ultimi 7 giorni": 7, "Ultimi 30 giorni": 30, "Ultimi 90 giorni": 90}
+        scelta_periodo = st.selectbox("Periodo", list(opzioni_periodo.keys()), key=f"periodo_{tipo_atto}")
+        giorni_sel = opzioni_periodo[scelta_periodo]
 
     # --- PAGINAZIONE "CARICA ALTRI" ---
     PAGINA_DIM = 25
     if 'paginazione' not in st.session_state:
         st.session_state.paginazione = {}
     # La chiave di contesto include sezione + filtri: se cambiano, il contatore riparte
-    ctx_key = f"{tipo_atto}|{tema_sel or ''}|{','.join(fonti_sel) if fonti_sel else ''}|{ricerca or ''}"
+    ctx_key = f"{tipo_atto}|{tema_sel or ''}|{','.join(fonti_sel) if fonti_sel else ''}|{giorni_sel or ''}|{ricerca or ''}"
     stato_pag = st.session_state.paginazione
     if stato_pag.get('ctx') != ctx_key:
         stato_pag['ctx'] = ctx_key
@@ -1975,7 +2043,7 @@ elif pagina_pulita in ["📖 Leggi", "🏛️ Provvedimenti", "⚖️ Sentenze",
     # Chiedo un articolo in più del necessario: se arriva, esiste un'altra pagina
     dati_db = db.estrai_per_tipo_atto(
         tipo_atto, st.session_state.user['id'],
-        ricerca_testo=ricerca, tema=tema_sel, fonti=fonti_sel, limite=limite_corrente + 1
+        ricerca_testo=ricerca, tema=tema_sel, fonti=fonti_sel, giorni=giorni_sel, limite=limite_corrente + 1
     )
     ci_sono_altri = len(dati_db) > limite_corrente
     mostra_hub_legale(dati_db[:limite_corrente], tipo_bacheca="radar")
