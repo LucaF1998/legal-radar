@@ -21,6 +21,30 @@ logging.basicConfig(
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "").strip()
 
 
+def normalizza_tema(tema):
+    """Riconduce le varianti di tema alla forma canonica. Allineata all'app e al backfill_temi."""
+    if not tema or not str(tema).strip():
+        return "Generale"
+    t = str(tema).strip().lower()
+    regole = [
+        (("privacy", "protezione dei dati", "protezione dati", "data protection", "gdpr", "dati personali"), "Privacy"),
+        (("cyber", "sicurezza informatica", "nis2", "nis 2"), "Cybersecurity"),
+        (("assicurat", "ivass", "polizz"), "Assicurativo"),
+        (("banc", "finanziar", "credito", "consob", "pagam: ", "pagament"), "Bancario e finanziario"),
+        (("tribut", "fiscal", "imposta", "agenzia delle entrate"), "Tributario"),
+        (("consumat", "pratiche commerciali", "agcm", "antitrust"), "Consumatori e pratiche commerciali"),
+        (("concorrenz", "competition"), "Concorrenza"),
+        (("intelligenza artificiale", "ai act", "ia ", "machine learning"), "Intelligenza artificiale"),
+        (("telemarket", "marketing"), "Telemarketing e marketing"),
+    ]
+    for chiavi, canonico in regole:
+        if any(k in t for k in chiavi):
+            return canonico
+    if t in ("diritto", "generale", "varie", "altro", "n/d", "nd", "null", "none"):
+        return "Generale"
+    return str(tema).strip().capitalize()
+
+
 def pulisci_titolo(titolo: str) -> str:
     """Normalizza i titoli sporchi dei feed istituzionali (es. CGUE)."""
     if not titolo:
@@ -180,6 +204,7 @@ def _ingest_rss(f: Dict) -> List[Tuple]:
             categoria = "provvedimento"  # fallback sicuro per atti ufficiali
         if not tema:
             tema = f.get('area') or "Generale"
+        tema = normalizza_tema(tema)
         if not rilevanza:
             rilevanza = "media"
         risultati.append((
