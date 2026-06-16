@@ -172,6 +172,23 @@ class LegalRadarDB:
                 PRIMARY KEY (article_id, report_id)
             )
             """,
+            # Stato letto/non letto dei report, per utente (parallelo a user_article_status)
+            """
+            CREATE TABLE IF NOT EXISTS user_report_status (
+                user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+                report_id INTEGER REFERENCES legal_radar_reports(id) ON DELETE CASCADE,
+                letto BOOLEAN DEFAULT TRUE,
+                PRIMARY KEY (user_id, report_id)
+            )
+            """,
+            # Report salvati, per utente (parallelo a bookmarks)
+            """
+            CREATE TABLE IF NOT EXISTS report_bookmarks (
+                user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+                report_id INTEGER REFERENCES legal_radar_reports(id) ON DELETE CASCADE,
+                PRIMARY KEY (user_id, report_id)
+            )
+            """,
         )
         try:
             with self.get_cursor() as cur:
@@ -639,16 +656,37 @@ class LegalRadarDB:
             cur.execute("DELETE FROM alert_keywords WHERE id = %s", (keyword_id,))
 
     # --- REPORT DEL RADAR (Fase 1: vetrina dei report mattutini) ---
-    def estrai_report_radar(self, ricerca_testo: str = "", limite: int = 100) -> List[Dict]:
-        """Legge i report ricchi inviati dal Radar, dal più recente."""
-        query = "SELECT * FROM legal_radar_reports"
-        params: List = []
+    def estrai_report_radar(self, user_id: int, ricerca_testo: str = "", filtro_rischio: str = "",
+                            filtro_tag: str = "", solo_salvati: bool = False,
+                            limite: int = 25, offset: int = 0) -> List[Dict]:
+        """Legge i report del Radar con filtri, paginazione e stato letto/salvato per l'utente.
+        Tecnica limite+1: chiedo un elemento in più per sapere se esistono altri, senza COUNT."""
+        query = """
+            SELECT r.*,
+                   (urs.report_id IS NOT NULL) AS letto,
+                   (rb.report_id IS NOT NULL) AS salvato
+            FROM legal_radar_reports r
+            LEFT JOIN user_report_status urs ON urs.report_id = r.id AND urs.user_id = %s
+            LEFT JOIN report_bookmarks rb ON rb.report_id = r.id AND rb.user_id = %s
+        """
+        condizioni: List[str] = []
+        params: List = [user_id, user_id]
+        if solo_salvati:
+            condizioni.append("rb.report_id IS NOT NULL")
         if ricerca_testo:
-            query += " WHERE (titolo ILIKE %s OR sintesi ILIKE %s OR area ILIKE %s OR analisi ILIKE %s)"
+            condizioni.append("(r.titolo ILIKE %s OR r.sintesi ILIKE %s OR r.area ILIKE %s OR r.analisi ILIKE %s)")
             tp = f"%{ricerca_testo}%"
             params.extend([tp, tp, tp, tp])
-        query += " ORDER BY data_report DESC, created_at DESC LIMIT %s"
-        params.append(limite)
+        if filtro_rischio:
+            condizioni.append("UPPER(r.livello_rischio) = %s")
+            params.append(filtro_rischio.upper())
+        if filtro_tag:
+            condizioni.append("UPPER(r.tag) = %s")
+            params.append(filtro_tag.upper())
+        if condizioni:
+            query += " WHERE " + " AND ".join(condizioni)
+        query += " ORDER BY r.data_report DESC, r.created_at DESC LIMIT %s OFFSET %s"
+        params.extend([limite + 1, offset])
         with self.get_cursor(dict_cursor=True) as cur:
             cur.execute(query, params)
             righe = cur.fetchall()
@@ -658,6 +696,43 @@ class LegalRadarDB:
         with self.get_cursor() as cur:
             cur.execute("SELECT COUNT(*) FROM legal_radar_reports")
             return cur.fetchone()[0]
+
+    def segna_report_letto(self, user_id: int, report_id: int) -> None:
+        with self.get_cursor() as cur:
+            cur.execute(
+                "INSERT INTO user_report_status (user_id, report_id, letto) VALUES (%s, %s, TRUE) "
+                "ON CONFLICT (user_id, report_id) DO NOTHING",
+                (user_id, report_id)
+            )
+
+    def segna_tutti_report_letti(self, user_id: int) -> None:
+        with self.get_cursor() as cur:
+            cur.execute("""
+                INSERT INTO user_report_status (user_id, report_id, letto)
+                SELECT %s, id, TRUE FROM legal_radar_reports
+                ON CONFLICT (user_id, report_id) DO NOTHING
+            """, (user_id,))
+
+    def aggiungi_report_bookmark(self, user_id: int, report_id: int) -> None:
+        with self.get_cursor() as cur:
+            cur.execute(
+                "INSERT INTO report_bookmarks (user_id, report_id) VALUES (%s, %s) ON CONFLICT DO NOTHING",
+                (user_id, report_id)
+            )
+
+    def rimuovi_report_bookmark(self, user_id: int, report_id: int) -> None:
+        with self.get_cursor() as cur:
+            cur.execute("DELETE FROM report_bookmarks WHERE user_id = %s AND report_id = %s", (user_id, report_id))
+
+    def estrai_ultimi_report_dashboard(self, limite: int = 3) -> List[Dict]:
+        """Ultimi report del Radar per la fascia in dashboard (senza stato per utente)."""
+        with self.get_cursor(dict_cursor=True) as cur:
+            cur.execute(
+                "SELECT id, titolo, area, tag, livello_rischio, data_report, sintesi "
+                "FROM legal_radar_reports ORDER BY data_report DESC, created_at DESC LIMIT %s",
+                (limite,)
+            )
+            return [dict(r) for r in cur.fetchall()]
 
     def lista_report_per_collegamento(self, limite: int = 50) -> List[Dict]:
         """Report recenti, in forma compatta, per popolare il selettore del banner."""
@@ -1465,11 +1540,12 @@ def mostra_report_radar(report: List[Dict]) -> None:
         rk = _rischio_badge(r.get('livello_rischio'))
         score_txt = f'<span class="meta-tag tag-rango">{score}</span>' if score else ''
         data_badge = f'<span class="meta-tag tag-rango">{data_str}</span>' if data_str else ''
+        badge_nuovo = '' if r.get('letto') else '<span class="badge-nuovo">Nuovo</span>'
         intestazione = (
             f'<div class="report-card">'
             f'<div style="margin-bottom:10px;">{tag_badge}{rk}{score_txt}'
             f'<span class="meta-tag tag-area">{e_area}</span>{data_badge}</div>'
-            f'<div class="report-title">{e_tit}</div>'
+            f'<div class="report-title">{e_tit}{badge_nuovo}</div>'
         )
         st.markdown(intestazione, unsafe_allow_html=True)
 
@@ -1513,9 +1589,30 @@ def mostra_report_radar(report: List[Dict]) -> None:
             st.markdown(f'<div class="report-sec"><a href="{ld}" target="_blank" class="report-link">↗ {fonte_uff}</a></div>', unsafe_allow_html=True)
         st.markdown('</div>', unsafe_allow_html=True)
 
+        rid = r['id']
+        # Bottoni azione: Salva / Segna letto, come per gli articoli (pillole compatte)
+        b1, b2, _sp = st.columns([1, 1, 3])
+        with b1:
+            if st.session_state.get('report_bacheca') == "salvati":
+                if st.button("Rimuovi", key=f"rem_rep_{rid}", use_container_width=True):
+                    db.rimuovi_report_bookmark(st.session_state.user['id'], rid)
+                    st.rerun()
+            elif r.get('salvato'):
+                st.button("Salvato ✓", key=f"saved_rep_{rid}", use_container_width=True, disabled=True)
+            else:
+                if st.button("Salva", key=f"save_rep_{rid}", use_container_width=True):
+                    db.aggiungi_report_bookmark(st.session_state.user['id'], rid)
+                    st.rerun()
+        with b2:
+            if not r.get('letto'):
+                if st.button("Segna letto", key=f"read_rep_{rid}", use_container_width=True):
+                    db.segna_report_letto(st.session_state.user['id'], rid)
+                    st.rerun()
+            else:
+                st.button("Letto ✓", key=f"readd_rep_{rid}", use_container_width=True, disabled=True)
+
         # Eliminazione riservata agli admin, con conferma esplicita
         if st.session_state.user.get('role') == 'admin':
-            rid = r['id']
             with st.expander("🗑️ Elimina report"):
                 conferma = st.checkbox("Confermo l'eliminazione di questo report", key=f"confdel_rep_{rid}")
                 if st.button("Elimina definitivamente", key=f"del_rep_{rid}", disabled=not conferma):
@@ -1611,6 +1708,29 @@ if pagina_pulita == "🏠 Dashboard":
                 unsafe_allow_html=True
             )
 
+        # --- FASCIA: ULTIMI REPORT DEL RADAR ---
+        ultimi_report = db.estrai_ultimi_report_dashboard(limite=3)
+        if ultimi_report:
+            st.markdown('<div class="pp-section"><h2>Ultimi report del Radar</h2></div>', unsafe_allow_html=True)
+            cols = st.columns(len(ultimi_report))
+            for col, rep in zip(cols, ultimi_report):
+                with col:
+                    rk = _rischio_badge(rep.get('livello_rischio'))
+                    e_tit = html.escape(str(rep.get('titolo') or ''))
+                    e_sint = html.escape(str(rep.get('sintesi') or ''))
+                    e_area = html.escape(str(rep.get('area') or ''))
+                    data_str = rep['data_report'].strftime('%d/%m') if rep.get('data_report') else ''
+                    foot = f"{e_area}{(' · ' + data_str) if data_str else ''}"
+                    st.markdown(
+                        f'<div class="pp-card">'
+                        f'<div>{rk}</div>'
+                        f'<div class="pp-card-title" style="cursor:default;">{e_tit}</div>'
+                        f'<div class="pp-card-sum">{e_sint}</div>'
+                        f'<div class="pp-foot">{foot}</div>'
+                        f'</div>',
+                        unsafe_allow_html=True
+                    )
+
         # --- GRIGLIA IN EVIDENZA (i successivi 3) ---
         secondari = in_evidenza[1:4]
         if secondari:
@@ -1637,11 +1757,48 @@ if pagina_pulita == "🏠 Dashboard":
                     st.markdown(f'<div class="mini"><div class="mm">{mm}</div><a href="{lk}" target="_blank">{tt}</a></div>', unsafe_allow_html=True)
 
 elif pagina_pulita == "📨 Report Radar":
-    col_h, _ = st.columns([3, 1])
+    col_h, col_btn = st.columns([3, 1])
     col_h.header("Report del Legal Radar")
+    with col_btn:
+        st.write("")
+        if st.button("✓ Segna tutto come letto", key="readall_report", use_container_width=True):
+            db.segna_tutti_report_letti(st.session_state.user['id'])
+            st.rerun()
     st.caption("I report mattutini ricevuti dal motore di intelligence del Radar, nel loro formato completo.")
-    report = db.estrai_report_radar(ricerca_testo=ricerca)
-    mostra_report_radar(report)
+
+    # Filtri: rischio e tag (in due colonne)
+    cf1, cf2 = st.columns(2)
+    scelta_rischio = cf1.selectbox("Livello di rischio", ["Tutti", "Alto", "Medio", "Basso"], key="rep_rischio")
+    scelta_tag = cf2.selectbox("Tipo", ["Tutti", "Certo", "Segnale"], key="rep_tag")
+    filtro_rischio = "" if scelta_rischio == "Tutti" else scelta_rischio
+    filtro_tag = "" if scelta_tag == "Tutti" else scelta_tag
+
+    st.session_state['report_bacheca'] = "sezione"
+
+    # --- PAGINAZIONE "CARICA ALTRI" (stessa tecnica delle altre sezioni) ---
+    PAGINA_DIM = 25
+    if 'pag_report' not in st.session_state:
+        st.session_state.pag_report = {}
+    ctx_key = f"{filtro_rischio}|{filtro_tag}|{ricerca or ''}"
+    stato_pag = st.session_state.pag_report
+    if stato_pag.get('ctx') != ctx_key:
+        stato_pag['ctx'] = ctx_key
+        stato_pag['n'] = PAGINA_DIM
+    limite_corrente = stato_pag['n']
+
+    dati_db = db.estrai_report_radar(
+        st.session_state.user['id'], ricerca_testo=ricerca,
+        filtro_rischio=filtro_rischio, filtro_tag=filtro_tag, limite=limite_corrente
+    )
+    ci_sono_altri = len(dati_db) > limite_corrente
+    mostra_report_radar(dati_db[:limite_corrente])
+
+    if ci_sono_altri:
+        if st.button(f"⬇️ Carica altri {PAGINA_DIM}", key="more_report", use_container_width=True):
+            stato_pag['n'] += PAGINA_DIM
+            st.rerun()
+    elif limite_corrente > PAGINA_DIM:
+        st.caption("Hai raggiunto la fine dei report per questi filtri.")
 
 elif pagina_pulita in ["📖 Leggi", "🏛️ Provvedimenti", "⚖️ Sentenze", "📰 News"]:
     # Mappa la voce di menu alla categoria
@@ -1693,9 +1850,23 @@ elif pagina_pulita in ["📖 Leggi", "🏛️ Provvedimenti", "⚖️ Sentenze",
         st.caption("Hai raggiunto la fine dell'archivio per questi filtri.")
 
 elif pagina_pulita == "🔖 I Miei Salvati":
-    st.header("I Miei Articoli Salvati")
+    st.header("I Miei Salvati")
     dati_salvati = db.estrai_bookmarks(user_id=st.session_state.user['id'], ricerca_testo=ricerca)
+    st.session_state['report_bacheca'] = "sezione"
+    if dati_salvati:
+        st.subheader("Articoli")
     mostra_hub_legale(dati_salvati, tipo_bacheca="bookmarks")
+
+    # Report del Radar salvati
+    report_salvati = db.estrai_report_radar(
+        st.session_state.user['id'], ricerca_testo=ricerca, solo_salvati=True, limite=100
+    )
+    if report_salvati:
+        st.subheader("Report del Radar")
+        st.session_state['report_bacheca'] = "salvati"
+        mostra_report_radar(report_salvati[:100])
+    elif not dati_salvati:
+        st.info("Non hai ancora salvato nulla. Usa il pulsante Salva su articoli e report.")
 
 elif pagina_pulita == "⚙️ Gestione Fonti":
     st.header("Database & Personalizzazione Fonti")
