@@ -1509,7 +1509,16 @@ with st.sidebar:
         "🔖 I Miei Salvati",
         "⚙️ Gestione Fonti"
     ]
-    pagina = st.radio("Navigazione", opzioni_nav, key="nav_pagina", label_visibility="collapsed")
+    # Navigazione programmatica (es. dal bottone "Apri nei Report Radar" in dashboard):
+    # uso una variabile-ponte 'vai_a' e il parametro index, senza scrivere la key del widget.
+    indice_iniziale = 0
+    if st.session_state.get('vai_a') in opzioni_nav:
+        indice_iniziale = opzioni_nav.index(st.session_state['vai_a'])
+        del st.session_state['vai_a']  # consumo la richiesta una sola volta
+        # Rimuovo lo stato del widget così il parametro index viene rispettato
+        st.session_state.pop('nav_pagina', None)
+    pagina = st.radio("Navigazione", opzioni_nav, index=indice_iniziale,
+                      key="nav_pagina", label_visibility="collapsed")
     
     st.divider()
     if st.button("Sincronizza archivio", type="primary", use_container_width=True):
@@ -1920,7 +1929,7 @@ elif pagina_pulita == "🏠 Dashboard":
                         unsafe_allow_html=True
                     )
                     if st.button("Apri nei Report Radar →", key=f"open_rep_{rep['id']}", use_container_width=True):
-                        st.session_state['nav_pagina'] = "📨 Report Radar"
+                        st.session_state['vai_a'] = "📨 Report Radar"
                         st.rerun()
 
         # --- GRIGLIA IN EVIDENZA (i successivi 3) ---
