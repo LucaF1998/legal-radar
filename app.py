@@ -19,6 +19,38 @@ from typing import List, Dict, Tuple, Optional
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
+# --- TESTO DELL'INFORMATIVA PRIVACY (art. 13 GDPR) ---
+# NB: i campi tra parentesi quadre vanno compilati prima della pubblicazione.
+TESTO_PRIVACY_POLICY = """
+**Ultimo aggiornamento:** [data]
+
+#### 1. Titolare del trattamento
+Il titolare del trattamento dei dati è **[Nome del titolare / ragione sociale]**, con sede in **[indirizzo]**, contattabile all'indirizzo email **[email di contatto]**.
+
+#### 2. Quali dati raccogliamo
+Nell'ambito dell'utilizzo della piattaforma "Legal Radar" trattiamo:
+- **Dati di registrazione e accesso:** il nome utente (o indirizzo email) e la password da te scelti per creare l'account. La password non è mai conservata in chiaro, ma esclusivamente in forma cifrata (hash).
+- **Dati di utilizzo del servizio:** le preferenze e le attività che generi usando la piattaforma, ad esempio le fonti che attivi o disattivi, gli articoli e i report che salvi tra i preferiti e lo stato di lettura dei contenuti.
+
+Non raccogliamo categorie particolari di dati (art. 9 GDPR) e non effettuiamo attività di profilazione.
+
+#### 3. Perché trattiamo i tuoi dati e su quale base giuridica
+- **Erogazione del servizio:** consentirti la registrazione, l'autenticazione e l'uso delle funzioni della piattaforma. Base giuridica: esecuzione di un contratto/servizio di cui sei parte (art. 6.1.b GDPR).
+- **Sicurezza e corretto funzionamento:** garantire l'integrità degli accessi e prevenire usi non autorizzati. Base giuridica: legittimo interesse del titolare (art. 6.1.f GDPR).
+
+#### 4. Come trattiamo e dove conserviamo i dati
+I dati sono conservati in un database (PostgreSQL) ospitato su infrastruttura cloud. Adottiamo misure tecniche adeguate, tra cui la cifratura delle password e l'accesso riservato tramite credenziali. I dati possono essere trattati su server situati nell'Unione Europea o, ove i fornitori lo prevedano, in paesi che garantiscono un livello di protezione adeguato ai sensi del GDPR.
+
+#### 5. Per quanto tempo conserviamo i dati
+I dati dell'account sono conservati per tutta la durata dell'utilizzo del servizio e fino a **[periodo, es. 12 mesi]** dall'ultimo accesso o dalla richiesta di cancellazione, salvo diversi obblighi di legge.
+
+#### 6. A chi comunichiamo i dati
+I dati non sono diffusi né ceduti a terzi per finalità commerciali. Possono essere trattati, per nostro conto e come responsabili del trattamento, dai fornitori dei servizi di hosting e infrastruttura cloud necessari al funzionamento della piattaforma.
+
+#### 7. I tuoi diritti
+In qualità di interessato puoi in ogni momento esercitare i diritti previsti dagli artt. 15-22 del GDPR: accesso ai tuoi dati, rettifica, cancellazione, limitazione e opposizione al trattamento, nonché portabilità dei dati. Hai inoltre il diritto di proporre reclamo all'Autorità Garante per la protezione dei dati personali (www.garanteprivacy.it). Per esercitare i tuoi diritti puoi scrivere a **[email di contatto]**.
+"""
+
 # --- 1. CLASSE ARCHITETTURALE DATABASE (POSTGRESQL MULTI-TENANT) ---
 class LegalRadarDB:
     def __init__(self, db_url: str):
@@ -1291,6 +1323,22 @@ def sincronizza_radar_in_database() -> None:
         db.salva_articoli_storico(articoli_scovati)
 
 # --- 5. SCHERMATA DI AUTENTICAZIONE ---
+def mostra_privacy_policy() -> None:
+    """Pagina dell'informativa privacy (raggiungibile anche prima del login via ?policy=1)."""
+    st.title("Informativa sul trattamento dei dati personali")
+    st.caption("ai sensi dell'art. 13 del Regolamento UE 2016/679 (GDPR)")
+    st.markdown(TESTO_PRIVACY_POLICY)
+    st.write("")
+    if st.button("← Torna indietro"):
+        st.query_params.clear()
+        st.rerun()
+
+# Se l'utente chiede la policy (link interno), mostro quella e mi fermo qui.
+# Funziona sia prima sia dopo il login, senza dipendere dalla sidebar.
+if st.query_params.get("policy"):
+    mostra_privacy_policy()
+    st.stop()
+
 if st.session_state.user is None:
     st.title("⚖️ Legal Radar | Autenticazione")
     st.caption("Accedi all'Intelligence Normativa Personalizzata")
@@ -1321,6 +1369,15 @@ if st.session_state.user is None:
                     st.rerun()
                 else:
                     st.error("Credenziali errate.")
+
+    # Nota privacy: testo + link interno alla policy (nessuna spunta richiesta)
+    st.markdown(
+        '<div style="margin-top:14px; font-size:12.5px; color:var(--ink-soft);">'
+        'Registrandoti confermi di aver letto la '
+        '<a href="?policy=1" target="_self" style="color:var(--accent); text-decoration:none;">Privacy Policy</a>.'
+        '</div>',
+        unsafe_allow_html=True
+    )
     st.stop()
 
 # --- 6. INTERFACCIA UTENTE AUTENTICATO ---
@@ -1360,6 +1417,13 @@ with st.sidebar:
     if st.button("Esci", use_container_width=True):
         st.session_state.user = None
         st.rerun()
+
+    st.markdown(
+        '<div style="margin-top:18px; font-size:11.5px;">'
+        '<a href="?policy=1" target="_self" style="color:var(--ink-faint); text-decoration:none;">Privacy Policy</a>'
+        '</div>',
+        unsafe_allow_html=True
+    )
 
 def mostra_hub_legale(lista_articoli: List[Dict], tipo_bacheca: str):
     if not lista_articoli:
