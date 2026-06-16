@@ -1,0 +1,21 @@
+name: Backfill temi (una tantum)
+"on":
+  workflow_dispatch:
+jobs:
+  run-backfill-temi:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout del codice sorgente
+      uses: actions/checkout@v4
+    - name: Setup dell'ambiente Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.10'
+    - name: Installazione dipendenze
+      run: |
+        python -m pip install --upgrade pip
+        pip install psycopg2-binary
+    - name: Esecuzione backfill temi
+      env:
+        DB_URL: ${{ secrets.DB_URL }}
+      run: python backfill_temi.py
