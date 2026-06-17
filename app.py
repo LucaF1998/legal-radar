@@ -242,6 +242,20 @@ class LegalRadarDB:
             logging.error("Errore registrazione utente: %s", e)
             return False
 
+    def reimposta_password(self, target_user_id: int, nuova_password: str) -> bool:
+        """Reimposta la password di un utente (azione admin). Salva solo l'hash bcrypt:
+        la password in chiaro non viene mai memorizzata. Ritorna False se troppo corta o su errore."""
+        if not nuova_password or len(nuova_password) < 8:
+            return False
+        hashed = bcrypt.hashpw(nuova_password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
+        try:
+            with self.get_cursor() as cur:
+                cur.execute("UPDATE users SET password_hash = %s WHERE id = %s", (hashed, target_user_id))
+                return cur.rowcount > 0
+        except Exception as e:
+            logging.error("Errore reset password: %s", e)
+            return False
+
     def verifica_utente(self, username: str, password: str) -> Optional[Dict]:
         with self.get_cursor(dict_cursor=True) as cur:
             cur.execute("SELECT * FROM users WHERE username = %s", (username.strip(),))
@@ -2245,6 +2259,24 @@ elif pagina_pulita == "⚙️ Gestione Fonti":
                                 st.warning("Impossibile: deve restare almeno un admin.")
                     else:
                         col_act.caption("(tu)")
+
+            # Reset password (admin): assegna una nuova password, non mostra mai quella vecchia
+            with st.expander(f"🔑 Reimposta password di {u['username']}"):
+                st.caption("Le password sono cifrate e non sono visibili a nessuno, nemmeno agli admin. "
+                           "Qui puoi assegnarne una nuova (almeno 8 caratteri) e comunicarla all'utente, "
+                           "che potrà poi cambiarla. Min. 8 caratteri.")
+                np1 = st.text_input("Nuova password", type="password", key=f"np1_{u['id']}")
+                np2 = st.text_input("Ripeti la nuova password", type="password", key=f"np2_{u['id']}")
+                conf_pw = st.checkbox("Confermo la reimpostazione", key=f"confpw_{u['id']}")
+                if st.button("Reimposta password", key=f"resetpw_{u['id']}", disabled=not conf_pw):
+                    if not np1 or len(np1) < 8:
+                        st.warning("La password deve avere almeno 8 caratteri.")
+                    elif np1 != np2:
+                        st.warning("Le due password non coincidono.")
+                    elif db.reimposta_password(u['id'], np1):
+                        st.success(f"Password di {u['username']} reimpostata. Comunicagliela: potrà cambiarla in seguito.")
+                    else:
+                        st.error("Reimpostazione non riuscita.")
 
         # SEZIONE 5 - RESET ARCHIVIO (solo admin, con conferma)
         st.divider()
