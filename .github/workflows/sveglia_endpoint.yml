@@ -1,0 +1,29 @@
+name: Sveglia endpoint prima dei report
+
+# Tiene "caldi" sia il servizio Render sia il database Neon nella finestra
+# che precede l'invio dei report dal Radar, così alla consegna sono gia svegli
+# e il primo tentativo va a buon fine (niente attesa del retry).
+#
+# NB: gli orari di cron sono in UTC. L'Italia a giugno e UTC+2.
+#     Gianmarco invia alle 08:00 ora italiana = 06:00 UTC.
+#     Finestra di risveglio: 07:30-08:00 ora italiana = 05:30-06:00 UTC,
+#     cosi alle 08:00 Render e Neon sono gia caldi.
+
+"on":
+  schedule:
+    # Ping ogni 10 minuti nella mezz'ora che precede l'invio (05:30, 05:40, 05:50, 06:00 UTC).
+    - cron: "30,40,50 5 * * *"
+    - cron: "0 6 * * *"
+  workflow_dispatch:   # avvio manuale, utile per provare
+
+jobs:
+  sveglia:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping all'endpoint (sveglia Render + Neon)
+        run: |
+          echo "Ping di risveglio a $(date -u) UTC"
+          # -m 60: do tempo al cold start; --retry per assorbire un primo colpo a vuoto
+          curl -m 60 --retry 2 --retry-delay 10 -s -o /dev/null -w "HTTP %{http_code}\n" \
+            https://legal-radar-ingest.onrender.com/health-db || true
+          echo "Ping completato (eventuali errori non bloccano il workflow)."
