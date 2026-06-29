@@ -12,6 +12,6 @@ jobs:
       with:
         python-version: '3.10'
     - name: Installa dipendenze
-      run: pip install requests
+      run: pip install requests beautifulsoup4
     - name: Esegui diagnostica
-      run: python diagnostica_garante.py
+      run: python anatomia_garante.py
