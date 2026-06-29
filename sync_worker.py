@@ -226,12 +226,58 @@ def _ingest_rss(f: Dict) -> List[Tuple]:
 def _ingest_scraper(f: Dict) -> List[Tuple]:
     """Ingestion per fonti senza RSS (parser HTML dedicato per fonte).
 
-    Punto di aggancio per fonti istituzionali che non espongono RSS.
-    Ogni fonte 'scraper' richiede un parser specifico: finché non è
-    implementato, non produce articoli (fail-safe, niente crash).
+    Riconosce la fonte dal campo 'url': se punta alla ricerca provvedimenti del
+    Garante, usa scraper_garante. Ogni provvedimento passa per la stessa AI degli
+    altri articoli (classificazione, riassunto, rilevanza, tema), così entra nel
+    flusso normale e compare nella sezione Provvedimenti del Portale.
     """
-    logging.info("Fonte '%s' di tipo scraper: parser dedicato non ancora implementato.", f['nome'])
-    return []
+    url = (f.get('url') or '').lower()
+    if 'garanteprivacy.it' not in url:
+        logging.info("Fonte scraper '%s' non riconosciuta: nessun parser dedicato.", f['nome'])
+        return []
+
+    # Import locale: lo scraper è un modulo a sé, così se manca non blocca il worker.
+    try:
+        from scraper_garante import scarica_provvedimenti, GaranteScraperError
+    except ImportError as e:
+        logging.error("Modulo scraper_garante non disponibile: %s", e)
+        return []
+
+    # scarica_provvedimenti solleva GaranteScraperError se non trova nulla:
+    # lo lasciamo propagare, così esegui_scansione_notturna lo registra come
+    # errore visibile nella salute della fonte (allarme anti-silenzio).
+    provvedimenti = scarica_provvedimenti()
+
+    risultati: List[Tuple] = []
+    for p in provvedimenti:
+        titolo = p['titolo']
+        link = p['link']
+        estratto = p.get('estratto') or ''
+        preview = estratto[:250] + ("..." if len(estratto) > 250 else "")
+        # I provvedimenti del Garante sono atti ufficiali: classificazione AI come tale.
+        riassunto, rilevanza, categoria, tema, _titolo_ai = genera_microriassunto(
+            titolo, estratto[:1200], e_ufficiale=True, serve_titolo=False)
+        if not categoria:
+            categoria = "provvedimento"  # fallback sicuro
+        if not tema:
+            tema = f.get('area') or "Privacy"
+        tema = normalizza_tema(tema)
+        if not rilevanza:
+            rilevanza = "media"
+        risultati.append((
+            titolo,
+            link,
+            preview,
+            f['macro'],
+            f['area'],
+            f['nome'],
+            riassunto,
+            rilevanza,
+            categoria,
+            tema,
+            p.get('data'),  # data ISO 'YYYY-MM-DD' o None
+        ))
+    return risultati
 
 
 STRATEGIE_INGESTION = {
