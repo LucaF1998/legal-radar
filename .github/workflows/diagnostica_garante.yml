@@ -1,0 +1,17 @@
+name: Diagnostica Garante (una tantum)
+"on":
+  workflow_dispatch:
+jobs:
+  diagnostica:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout del codice sorgente
+      uses: actions/checkout@v4
+    - name: Setup Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.10'
+    - name: Installa dipendenze
+      run: pip install requests
+    - name: Esegui diagnostica
+      run: python diagnostica_garante.py
