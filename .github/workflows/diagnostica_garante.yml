@@ -14,4 +14,4 @@ jobs:
     - name: Installa dipendenze
       run: pip install requests beautifulsoup4
     - name: Esegui diagnostica
-      run: python anatomia_garante.py
+      run: python scraper_garante.py
