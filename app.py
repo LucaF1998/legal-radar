@@ -52,25 +52,73 @@ In qualità di interessato puoi in ogni momento esercitare i diritti previsti da
 """
 
 # --- 1. CLASSE ARCHITETTURALE DATABASE (POSTGRESQL MULTI-TENANT) ---
+@st.cache_resource
+def _conn_condivisa():
+    """Contenitore cachato della connessione condivisa al database.
+    È un dict mutabile {'c': connessione} così posso rimpiazzare la connessione
+    interna (se Neon la chiude) senza perdere il contenitore cachato.
+    Cachato da Streamlit = vive tra i rerun = niente riapertura ad ogni clic."""
+    return {"c": None}
+
+
 class LegalRadarDB:
     def __init__(self, db_url: str):
         self.db_url = db_url
 
-    # --- CONNESSIONE: context manager con commit/rollback/close GARANTITI ---
+    def _apri_connessione(self):
+        """Apre una connessione nuova. keepalives: aiuta a tenere viva la connessione
+        ed evitare che firewall/Neon la chiudano silenziosamente."""
+        return psycopg2.connect(
+            self.db_url,
+            connect_timeout=10,
+            keepalives=1,
+            keepalives_idle=30,
+            keepalives_interval=10,
+            keepalives_count=5,
+        )
+
+    def _connessione_valida(self):
+        """Restituisce la connessione condivisa, RIAPRENDOLA se assente o chiusa/stantia.
+        È la chiave dell'ottimizzazione: riusa la stessa connessione tra i rerun
+        (niente handshake ad ogni clic), ma si auto-ripara se Neon l'ha chiusa.
+        Il ping SELECT 1 su connessione già aperta costa pochi ms: trascurabile
+        rispetto ai ~250ms di un handshake completo che facevamo prima ad ogni query."""
+        conn = _conn_condivisa()
+        need_new = conn["c"] is None or getattr(conn["c"], "closed", 1) != 0
+        if not need_new:
+            try:
+                with conn["c"].cursor() as ping:
+                    ping.execute("SELECT 1")
+            except Exception:
+                need_new = True
+        if need_new:
+            try:
+                if conn["c"] is not None:
+                    conn["c"].close()
+            except Exception:
+                pass
+            conn["c"] = self._apri_connessione()
+        return conn["c"]
+
+    # --- CONNESSIONE: context manager con commit/rollback GARANTITI ---
+    # La connessione viene RIUSATA tra i rerun (non più aperta/chiusa ad ogni metodo):
+    # è questo che elimina il "paio di secondi" ad ogni clic.
     @contextmanager
     def get_cursor(self, dict_cursor: bool = False):
-        conn = psycopg2.connect(self.db_url)
+        conn = self._connessione_valida()
         factory = psycopg2.extras.DictCursor if dict_cursor else None
         cur = conn.cursor(cursor_factory=factory)
         try:
             yield cur
             conn.commit()
         except Exception:
-            conn.rollback()
+            try:
+                conn.rollback()
+            except Exception:
+                pass
             raise
         finally:
-            cur.close()
-            conn.close()
+            cur.close()  # chiudo solo il cursore, NON la connessione (la riuso)
 
     def init_db(self) -> None:
         commands = (
