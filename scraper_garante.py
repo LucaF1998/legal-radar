@@ -15,7 +15,6 @@ Principi:
 Dipendenze: requests, beautifulsoup4
 """
 import re
-import time
 import logging
 from typing import List, Dict
 from urllib.parse import urljoin
@@ -82,10 +81,14 @@ def _parse_pagina(html: str) -> List[Dict]:
 
         # Numero di registro + data dall'estratto ("Registro dei provvedimenti n. 377 del 28 maggio 2026")
         reg = re.search(r"Registro dei provvedimenti n\.\s*(\d+)\s*del\s*(\d{1,2}\s+\w+\s+\d{4})", estratto)
-        num_reg = reg.group(1) if reg else None
-        data_txt = reg.group(2) if reg else None
-        if not data_txt:
-            # Fallback: data dal titolo
+        if reg:
+            num_reg = reg.group(1)
+            data_txt = reg.group(2)
+        else:
+            # Fallback 1: numero di registro senza data accanto
+            solo_num = re.search(r"Registro dei provvedimenti n\.\s*(\d+)", estratto)
+            num_reg = solo_num.group(1) if solo_num else None
+            # Fallback 2: data dal titolo
             dm = re.search(r"(\d{1,2}\s+\w+\s+\d{4})", titolo)
             data_txt = dm.group(1) if dm else None
 
@@ -100,50 +103,35 @@ def _parse_pagina(html: str) -> List[Dict]:
     return risultati
 
 
-def scarica_provvedimenti(max_pagine: int = 2, pausa_sec: float = 5.0) -> List[Dict]:
-    """Scarica i provvedimenti dalle prime `max_pagine` pagine di risultati.
-    Per il giro quotidiano bastano 1-2 pagine (i piu recenti stanno in cima).
-    Solleva GaranteScraperError se non trova nulla (allarme anti-silenzio)."""
-    tutti: List[Dict] = []
-    visti = set()
-    for pagina in range(1, max_pagine + 1):
-        # La prima pagina e l'URL semplice; per le successive si usa il parametro cur.
-        if pagina == 1:
-            url = URL_PROVVEDIMENTI
-        else:
-            url = f"{URL_PROVVEDIMENTI}?cur={pagina}"
-        try:
-            r = requests.get(url, headers=HEADERS, timeout=30)
-        except Exception as e:
-            logging.error("Errore di rete su pagina %d: %s", pagina, e)
-            break
-        if r.status_code != 200:
-            logging.warning("Pagina %d: status %d, interrompo.", pagina, r.status_code)
-            break
-        voci = _parse_pagina(r.text)
-        logging.info("Pagina %d: %d provvedimenti.", pagina, len(voci))
-        for v in voci:
-            if v["docweb"] not in visti:
-                visti.add(v["docweb"])
-                tutti.append(v)
-        if pagina < max_pagine:
-            time.sleep(pausa_sec)  # cortesia verso il server
+def scarica_provvedimenti(pausa_sec: float = 0.0) -> List[Dict]:
+    """Scarica i provvedimenti piu recenti dalla pagina di ricerca del Garante.
+    Per il giro quotidiano basta la prima pagina (i piu recenti stanno in cima, e
+    l'idempotenza del DB evita i doppioni). Solleva GaranteScraperError se non trova
+    nulla (allarme anti-silenzio: blocco o sito cambiato)."""
+    try:
+        r = requests.get(URL_PROVVEDIMENTI, headers=HEADERS, timeout=30)
+    except Exception as e:
+        raise GaranteScraperError(f"Errore di rete verso il Garante: {e}")
+    if r.status_code != 200:
+        raise GaranteScraperError(f"Il Garante ha risposto con status {r.status_code} (atteso 200).")
+
+    provvedimenti = _parse_pagina(r.text)
+    logging.info("Provvedimenti estratti: %d", len(provvedimenti))
 
     # ALLARME ANTI-SILENZIO: zero risultati = qualcosa non va (blocco o sito cambiato).
-    if not tutti:
+    if not provvedimenti:
         raise GaranteScraperError(
             "Nessun provvedimento estratto dal sito del Garante. "
             "Possibile blocco (403) o cambio della struttura della pagina."
         )
-    logging.info("Totale provvedimenti unici raccolti: %d", len(tutti))
-    return tutti
+    return provvedimenti
 
 
 if __name__ == "__main__":
     # Esecuzione diretta = prova manuale: stampa quello che troverebbe.
     try:
-        prov = scarica_provvedimenti(max_pagine=2)
-        for p in prov[:10]:
+        prov = scarica_provvedimenti()
+        for p in prov:
             print(f"[{p['data']}] reg n.{p['num_registro']} docweb {p['docweb']}")
             print(f"   {p['titolo'][:90]}")
             print(f"   {p['link']}")
