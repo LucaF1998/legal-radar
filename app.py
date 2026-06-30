@@ -1681,14 +1681,28 @@ def mostra_hub_legale(lista_articoli: List[Dict], tipo_bacheca: str):
                             db.segna_letto(st.session_state.user['id'], art['id'])
                         # niente st.rerun(): mostro il risultato qui sotto, nello stesso ciclo
             with b4:
-                # Scarica PDF del singolo articolo (include l'analisi AI se già generata in sessione)
-                try:
-                    pdf_bytes = pdf_export.pdf_singolo(art, analisi_extra=st.session_state.ai_summaries.get(link))
-                    st.download_button("⬇ PDF", data=pdf_bytes,
+                # PDF del singolo articolo: lo preparo al clic (genero AI se manca,
+                # e scarico il testo completo se richiesto), poi mostro il download.
+                stato_pdf = st.session_state.setdefault('pdf_singolo_pronti', {})
+                incl_testo = st.checkbox("Testo completo", key=f"incltesto_{art['id']}",
+                                         help="Include il testo integrale scaricato dalla fonte (più lento)")
+                if art['id'] not in stato_pdf:
+                    if st.button("⬇ Prepara PDF", key=f"preppdf_{art['id']}", use_container_width=True):
+                        with st.spinner("Preparo il PDF…"):
+                            # Analisi: uso quella in sessione, o la genero ora se manca
+                            analisi = st.session_state.ai_summaries.get(link)
+                            if not analisi:
+                                analisi = genera_sintesi_groq(link, art.get('preview', ''))
+                                st.session_state.ai_summaries[link] = analisi
+                            # Testo completo solo se richiesto
+                            testo = estrai_testo_pulito(link) if incl_testo else None
+                            stato_pdf[art['id']] = pdf_export.pdf_singolo(
+                                art, analisi_extra=analisi, testo_completo=testo)
+                        st.rerun()
+                else:
+                    st.download_button("⬇ Scarica PDF", data=stato_pdf[art['id']],
                                        file_name=f"articolo_{art['id']}.pdf", mime="application/pdf",
-                                       key=f"pdf_{art['id']}", use_container_width=True)
-                except Exception as e:
-                    logging.error("Errore PDF articolo %s: %s", art.get('id'), e)
+                                       key=f"dlpdf_{art['id']}", use_container_width=True)
             # Se l'analisi esiste (appena generata o già presente), la mostro sotto la card
             if link in st.session_state.ai_summaries:
                 st.markdown("<div style='font-size:13px; font-weight:600; color:var(--accent); margin-top:6px;'>✦ Analisi strategica</div>", unsafe_allow_html=True)
@@ -2137,23 +2151,46 @@ elif pagina_pulita in ["📖 Leggi", "🏛️ Provvedimenti", "⚖️ Sentenze",
         st.caption("Hai raggiunto la fine dell'archivio per questi filtri.")
 
 elif pagina_pulita == "🔖 I Miei Salvati":
-    col_hs, col_dl = st.columns([3, 1])
-    col_hs.header("I Miei Salvati")
+    st.header("I Miei Salvati")
     dati_salvati = db.estrai_bookmarks(user_id=st.session_state.user['id'], ricerca_testo=ricerca)
-    # Pulsante per scaricare l'intera rassegna degli articoli salvati in PDF
+
+    # Export della rassegna in PDF: preparazione progressiva (genera l'AI mancante,
+    # opzionalmente scarica il testo completo), poi download.
     if dati_salvati:
-        with col_dl:
-            st.write("")
-            try:
-                pdf_rass = pdf_export.pdf_rassegna(
-                    dati_salvati,
-                    titolo_rassegna=f"Rassegna salvati - {st.session_state.user['username']}"
-                )
-                st.download_button("⬇ Scarica rassegna PDF", data=pdf_rass,
+        with st.expander("⬇ Esporta rassegna in PDF"):
+            incl_testo_rass = st.checkbox("Includi il testo completo di ogni articolo (più lento)",
+                                          key="rass_incl_testo")
+            if 'rassegna_pdf_pronta' not in st.session_state:
+                if st.button("Prepara rassegna PDF", key="prep_rassegna"):
+                    analisi_map, testo_map = {}, {}
+                    barra = st.progress(0.0, text="Preparazione in corso…")
+                    tot = len(dati_salvati)
+                    for i, art in enumerate(dati_salvati):
+                        link_a = art.get('link', '')
+                        # Analisi: quella in sessione, o salvata, o generata ora
+                        analisi = st.session_state.ai_summaries.get(link_a)
+                        if not analisi and not art.get('riassunto_ai'):
+                            analisi = genera_sintesi_groq(link_a, art.get('preview', ''))
+                        if analisi:
+                            analisi_map[art['id']] = analisi
+                        if incl_testo_rass:
+                            testo_map[art['id']] = estrai_testo_pulito(link_a)
+                        barra.progress((i + 1) / tot, text=f"Elaborato {i+1} di {tot}…")
+                    st.session_state.rassegna_pdf_pronta = pdf_export.pdf_rassegna(
+                        dati_salvati,
+                        titolo_rassegna=f"Rassegna salvati - {st.session_state.user['username']}",
+                        analisi_per_id=analisi_map, testo_per_id=testo_map)
+                    barra.empty()
+                    st.rerun()
+            else:
+                st.download_button("⬇ Scarica rassegna PDF",
+                                   data=st.session_state.rassegna_pdf_pronta,
                                    file_name="rassegna_salvati.pdf", mime="application/pdf",
                                    use_container_width=True)
-            except Exception as e:
-                logging.error("Errore PDF rassegna: %s", e)
+                if st.button("Rigenera", key="rigen_rassegna"):
+                    del st.session_state.rassegna_pdf_pronta
+                    st.rerun()
+
     st.session_state['report_bacheca'] = "sezione"
     if dati_salvati:
         st.subheader("Articoli")
