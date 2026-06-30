@@ -1193,6 +1193,34 @@ def estrai_testo_pulito(url: str) -> str:
         return " ".join([p.get_text(strip=True) for p in paragraphs if len(p.get_text(strip=True)) > 45])[:6000]
     except: return ""
 
+def estrai_testo_completo(url: str) -> str:
+    """Estrazione più completa del testo di un articolo, per l'export PDF.
+    Rispetto a estrai_testo_pulito: soglia paragrafi più bassa (non scarta righe
+    corte come elenchi e dati), timeout più lungo, limite più alto. Toglie prima
+    gli elementi di navigazione noti (nav, header, footer, script)."""
+    if url.lower().endswith(('.pdf', '.zip', '.doc')):
+        return ""
+    try:
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+        res = requests.get(url, headers=headers, timeout=15)
+        soup = BeautifulSoup(res.text, 'html.parser')
+        # Rimuovo i blocchi di navigazione/struttura prima di estrarre il testo
+        for tag in soup.find_all(['nav', 'header', 'footer', 'script', 'style', 'aside']):
+            tag.decompose()
+        # Preferisco il contenuto dentro <article> o <main> se presenti (è il corpo vero)
+        corpo = soup.find('article') or soup.find('main') or soup
+        blocchi = corpo.find_all(['p', 'li', 'h2', 'h3', 'td'])
+        testo = " ".join(
+            b.get_text(strip=True) for b in blocchi
+            if len(b.get_text(strip=True)) > 15  # soglia bassa: tengo anche righe corte
+        )
+        # Fallback: se ho raccolto poco, prendo tutto il testo del corpo
+        if len(testo) < 200:
+            testo = corpo.get_text(" ", strip=True)
+        return testo[:12000]  # limite generoso; il taglio fine lo fa il PDF
+    except Exception:
+        return ""
+
 # --- MODIFICA: POTENZIAMENTO PROMPT AI VERTICALE (Punto 2) ---
 def genera_sintesi_groq(url: str, preview_text: str) -> str:
     raw_key = st.secrets.get("GROQ_API_KEY", "").strip()
@@ -1681,11 +1709,9 @@ def mostra_hub_legale(lista_articoli: List[Dict], tipo_bacheca: str):
                             db.segna_letto(st.session_state.user['id'], art['id'])
                         # niente st.rerun(): mostro il risultato qui sotto, nello stesso ciclo
             with b4:
-                # PDF del singolo articolo: lo preparo al clic (genero AI se manca,
-                # e scarico il testo completo se richiesto), poi mostro il download.
+                # PDF del singolo articolo: lo preparo al clic (genero l'analisi AI
+                # se manca), poi mostro il download.
                 stato_pdf = st.session_state.setdefault('pdf_singolo_pronti', {})
-                incl_testo = st.checkbox("Testo completo", key=f"incltesto_{art['id']}",
-                                         help="Include il testo integrale scaricato dalla fonte (più lento)")
                 if art['id'] not in stato_pdf:
                     if st.button("⬇ Prepara PDF", key=f"preppdf_{art['id']}", use_container_width=True):
                         with st.spinner("Preparo il PDF…"):
@@ -1694,10 +1720,7 @@ def mostra_hub_legale(lista_articoli: List[Dict], tipo_bacheca: str):
                             if not analisi:
                                 analisi = genera_sintesi_groq(link, art.get('preview', ''))
                                 st.session_state.ai_summaries[link] = analisi
-                            # Testo completo solo se richiesto
-                            testo = estrai_testo_pulito(link) if incl_testo else None
-                            stato_pdf[art['id']] = pdf_export.pdf_singolo(
-                                art, analisi_extra=analisi, testo_completo=testo)
+                            stato_pdf[art['id']] = pdf_export.pdf_singolo(art, analisi_extra=analisi)
                         st.rerun()
                 else:
                     st.download_button("⬇ Scarica PDF", data=stato_pdf[art['id']],
@@ -2154,15 +2177,13 @@ elif pagina_pulita == "🔖 I Miei Salvati":
     st.header("I Miei Salvati")
     dati_salvati = db.estrai_bookmarks(user_id=st.session_state.user['id'], ricerca_testo=ricerca)
 
-    # Export della rassegna in PDF: preparazione progressiva (genera l'AI mancante,
-    # opzionalmente scarica il testo completo), poi download.
+    # Export della rassegna in PDF: preparazione progressiva (genera l'analisi AI
+    # mancante per ogni articolo), poi download.
     if dati_salvati:
         with st.expander("⬇ Esporta rassegna in PDF"):
-            incl_testo_rass = st.checkbox("Includi il testo completo di ogni articolo (più lento)",
-                                          key="rass_incl_testo")
             if 'rassegna_pdf_pronta' not in st.session_state:
                 if st.button("Prepara rassegna PDF", key="prep_rassegna"):
-                    analisi_map, testo_map = {}, {}
+                    analisi_map = {}
                     barra = st.progress(0.0, text="Preparazione in corso…")
                     tot = len(dati_salvati)
                     for i, art in enumerate(dati_salvati):
@@ -2173,13 +2194,11 @@ elif pagina_pulita == "🔖 I Miei Salvati":
                             analisi = genera_sintesi_groq(link_a, art.get('preview', ''))
                         if analisi:
                             analisi_map[art['id']] = analisi
-                        if incl_testo_rass:
-                            testo_map[art['id']] = estrai_testo_pulito(link_a)
                         barra.progress((i + 1) / tot, text=f"Elaborato {i+1} di {tot}…")
                     st.session_state.rassegna_pdf_pronta = pdf_export.pdf_rassegna(
                         dati_salvati,
                         titolo_rassegna=f"Rassegna salvati - {st.session_state.user['username']}",
-                        analisi_per_id=analisi_map, testo_per_id=testo_map)
+                        analisi_per_id=analisi_map)
                     barra.empty()
                     st.rerun()
             else:
