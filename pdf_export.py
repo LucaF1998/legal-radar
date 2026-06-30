@@ -26,9 +26,30 @@ def pulisci_testo_completo(testo: str) -> str:
     if not testo:
         return ""
     s = _re.sub(r"\s+", " ", str(testo))
+
+    # 1) TAGLIO DEL MENU INIZIALE: trovo dove inizia il contenuto vero e scarto
+    #    tutto ciò che lo precede. Più robusto che elencare cosa togliere.
+    marcatori = [
+        r"IL GARANTE PER LA PROTEZIONE",
+        r"\[doc\.?\s*web",
+        r"Registro dei provvedimenti",
+        r"VISTO il Regolamento",
+        r"\bSintesi\b",
+        r"Azioni di mitigazione",
+        r"Prodotti e/?o? versioni affette",
+    ]
+    pos_inizio = None
+    for pat in marcatori:
+        m = _re.search(pat, s, flags=_re.IGNORECASE)
+        if m and (pos_inizio is None or m.start() < pos_inizio):
+            pos_inizio = m.start()
+    if pos_inizio is not None and pos_inizio > 0:
+        s = s[pos_inizio:]
+
     rumore = [
-        r"apre una nuova finestra", r"seguici su", r"Apri menu principale",
+        r"apre una nuova finestra", r"seguici[_ ]su", r"Apri menu principale",
         r"apri_ricerca", r"Condividi(Facebook|Twitter|LinkedIn|Whatsapp)+",
+        r"Trasforma contenuto in PDF", r"Men[uù] azioni", r"\bAscolta\b",
         r"linkedin:", r"youtube:", r"Twitter:", r"Telegram:", r"RSS:",
         r"Lingue disponibili.*?english",
     ]
