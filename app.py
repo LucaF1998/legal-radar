@@ -8,6 +8,7 @@ import re
 import json
 import html
 import logging
+import pdf_export
 from contextlib import contextmanager
 from bs4 import BeautifulSoup
 from datetime import datetime
@@ -1646,7 +1647,7 @@ def mostra_hub_legale(lista_articoli: List[Dict], tipo_bacheca: str):
             st.markdown(card_html, unsafe_allow_html=True)
             link = art['link']
             # Bottoni azione: pillole compatte e ravvicinate (l'ultima colonna vuota le tiene strette a sinistra)
-            b1, b2, b3, _sp = st.columns([1, 1, 1, 2])
+            b1, b2, b3, b4, _sp = st.columns([1, 1, 1, 1, 1])
             with b1:
                 if tipo_bacheca == "bookmarks":
                     if st.button("Rimuovi", key=f"rem_{art['id']}", use_container_width=True):
@@ -1679,6 +1680,15 @@ def mostra_hub_legale(lista_articoli: List[Dict], tipo_bacheca: str):
                                     db.aggiorna_riassunto_articolo(art['id'], meta['riassunto'], meta['rilevanza'])
                             db.segna_letto(st.session_state.user['id'], art['id'])
                         # niente st.rerun(): mostro il risultato qui sotto, nello stesso ciclo
+            with b4:
+                # Scarica PDF del singolo articolo (include l'analisi AI se già generata in sessione)
+                try:
+                    pdf_bytes = pdf_export.pdf_singolo(art, analisi_extra=st.session_state.ai_summaries.get(link))
+                    st.download_button("⬇ PDF", data=pdf_bytes,
+                                       file_name=f"articolo_{art['id']}.pdf", mime="application/pdf",
+                                       key=f"pdf_{art['id']}", use_container_width=True)
+                except Exception as e:
+                    logging.error("Errore PDF articolo %s: %s", art.get('id'), e)
             # Se l'analisi esiste (appena generata o già presente), la mostro sotto la card
             if link in st.session_state.ai_summaries:
                 st.markdown("<div style='font-size:13px; font-weight:600; color:var(--accent); margin-top:6px;'>✦ Analisi strategica</div>", unsafe_allow_html=True)
@@ -2127,8 +2137,23 @@ elif pagina_pulita in ["📖 Leggi", "🏛️ Provvedimenti", "⚖️ Sentenze",
         st.caption("Hai raggiunto la fine dell'archivio per questi filtri.")
 
 elif pagina_pulita == "🔖 I Miei Salvati":
-    st.header("I Miei Salvati")
+    col_hs, col_dl = st.columns([3, 1])
+    col_hs.header("I Miei Salvati")
     dati_salvati = db.estrai_bookmarks(user_id=st.session_state.user['id'], ricerca_testo=ricerca)
+    # Pulsante per scaricare l'intera rassegna degli articoli salvati in PDF
+    if dati_salvati:
+        with col_dl:
+            st.write("")
+            try:
+                pdf_rass = pdf_export.pdf_rassegna(
+                    dati_salvati,
+                    titolo_rassegna=f"Rassegna salvati - {st.session_state.user['username']}"
+                )
+                st.download_button("⬇ Scarica rassegna PDF", data=pdf_rass,
+                                   file_name="rassegna_salvati.pdf", mime="application/pdf",
+                                   use_container_width=True)
+            except Exception as e:
+                logging.error("Errore PDF rassegna: %s", e)
     st.session_state['report_bacheca'] = "sezione"
     if dati_salvati:
         st.subheader("Articoli")
