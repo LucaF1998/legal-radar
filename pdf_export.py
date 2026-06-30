@@ -16,9 +16,11 @@ GREY = (110, 110, 115)
 
 
 def _t(testo) -> str:
-    """Rende il testo sicuro per il PDF: normalizza i caratteri tipografici
-    problematici (virgolette curve, trattini lunghi) che i font base non gestiscono.
-    Normalizza anche gli a-capo (\\r\\n, \\r -> \\n) per evitare problemi di layout."""
+    """Rende il testo SEMPRE rappresentabile dal font PDF (Helvetica = latin-1).
+    Prima normalizza i caratteri tipografici comuni (virgolette curve, trattini),
+    poi sostituisce qualunque carattere non rappresentabile (emoji, simboli, alfabeti
+    non latini) con un placeholder, così la generazione non può mai crashare,
+    qualunque cosa arrivi dall'AI o dalle fonti."""
     if testo is None:
         return ""
     s = str(testo)
@@ -26,11 +28,16 @@ def _t(testo) -> str:
         "\u2018": "'", "\u2019": "'", "\u201c": '"', "\u201d": '"',
         "\u2013": "-", "\u2014": "-", "\u2026": "...", "\u00a0": " ",
         "\u2022": "-", "\u00b7": "-", "\r\n": "\n", "\r": "\n", "\t": " ",
+        "\u2192": "->", "\u2190": "<-", "\u20ac": "EUR", "\u2705": "[ok]",
+        "\u26a0": "[!]", "\ufe0f": "",
     }
     for a, b in sostituzioni.items():
         s = s.replace(a, b)
-    # Rimuovo eventuali caratteri di controllo residui (tranne \n) che romperebbero il layout
+    # Rimuovo caratteri di controllo (tranne newline)
     s = "".join(ch for ch in s if ch == "\n" or ord(ch) >= 32)
+    # Rete di sicurezza finale: garantisco che ogni carattere sia rappresentabile
+    # in latin-1 (il set del font base). I non rappresentabili diventano '?'.
+    s = s.encode("latin-1", "replace").decode("latin-1")
     return s
 
 
