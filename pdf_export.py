@@ -8,6 +8,7 @@ pronti per st.download_button.
 from typing import List, Dict, Optional
 from datetime import datetime
 from fpdf import FPDF
+import re as _re
 
 # Colori coerenti col Portale (accento blu, testo scuro)
 ACCENT = (0, 113, 227)
@@ -15,12 +16,35 @@ INK = (29, 29, 31)
 GREY = (110, 110, 115)
 
 
+import re as _re
+
+def pulisci_testo_completo(testo: str) -> str:
+    """Ripulisce il testo grezzo estratto da una pagina web, togliendo gli elementi
+    di navigazione più comuni (menu, 'apre una nuova finestra', 'seguici su', ecc.).
+    NB: è un best-effort - ogni sito è diverso, quindi qualche residuo può restare.
+    Meglio dell'anteprima, ma non perfetto."""
+    if not testo:
+        return ""
+    s = _re.sub(r"\s+", " ", str(testo))
+    rumore = [
+        r"apre una nuova finestra", r"seguici su", r"Apri menu principale",
+        r"apri_ricerca", r"Condividi(Facebook|Twitter|LinkedIn|Whatsapp)+",
+        r"linkedin:", r"youtube:", r"Twitter:", r"Telegram:", r"RSS:",
+        r"Lingue disponibili.*?english",
+    ]
+    for pat in rumore:
+        s = _re.sub(pat, " ", s, flags=_re.IGNORECASE)
+    # Spezzo le parole "incollate" dei menu (minuscola seguita da maiuscola)
+    s = _re.sub(r"([a-zà-ù])([A-ZÀ-Ù])", r"\1 \2", s)
+    s = _re.sub(r"\s{2,}", " ", s).strip()
+    return s[:5000]  # taglio: il testo pieno può essere enorme
+
+
 def _t(testo) -> str:
     """Rende il testo SEMPRE rappresentabile dal font PDF (Helvetica = latin-1).
-    Prima normalizza i caratteri tipografici comuni (virgolette curve, trattini),
-    poi sostituisce qualunque carattere non rappresentabile (emoji, simboli, alfabeti
-    non latini) con un placeholder, così la generazione non può mai crashare,
-    qualunque cosa arrivi dall'AI o dalle fonti."""
+    Normalizza i caratteri tipografici, RIMUOVE emoji/simboli non rappresentabili
+    (invece di lasciare '?') e ripulisce la sintassi markdown (**grassetto**, #, *)
+    che l'AI inserisce ma che il PDF non interpreta."""
     if testo is None:
         return ""
     s = str(testo)
@@ -28,16 +52,22 @@ def _t(testo) -> str:
         "\u2018": "'", "\u2019": "'", "\u201c": '"', "\u201d": '"',
         "\u2013": "-", "\u2014": "-", "\u2026": "...", "\u00a0": " ",
         "\u2022": "-", "\u00b7": "-", "\r\n": "\n", "\r": "\n", "\t": " ",
-        "\u2192": "->", "\u2190": "<-", "\u20ac": "EUR", "\u2705": "[ok]",
-        "\u26a0": "[!]", "\ufe0f": "",
+        "\u2192": "->", "\u2190": "<-", "\u20ac": "EUR",
     }
     for a, b in sostituzioni.items():
         s = s.replace(a, b)
+    # Ripulisco il markdown: **grassetto** -> grassetto, ## titoli, * elenchi
+    s = _re.sub(r"\*\*(.+?)\*\*", r"\1", s)   # **bold**
+    s = _re.sub(r"(?m)^\s*#{1,6}\s*", "", s)   # ## titoli a inizio riga
+    s = _re.sub(r"(?m)^\s*[\*\-]\s+", "- ", s)  # bullet normalizzati a "- "
+    s = s.replace("**", "").replace("__", "")
     # Rimuovo caratteri di controllo (tranne newline)
     s = "".join(ch for ch in s if ch == "\n" or ord(ch) >= 32)
-    # Rete di sicurezza finale: garantisco che ogni carattere sia rappresentabile
-    # in latin-1 (il set del font base). I non rappresentabili diventano '?'.
-    s = s.encode("latin-1", "replace").decode("latin-1")
+    # Rete di sicurezza: i caratteri non latin-1 (emoji, ideogrammi, simboli vari)
+    # vengono RIMOSSI (non sostituiti con '?'), così niente "?" orfani nei titoli.
+    s = s.encode("latin-1", "ignore").decode("latin-1")
+    # Compatto eventuali spazi doppi lasciati dalla rimozione di emoji
+    s = _re.sub(r"[ ]{2,}", " ", s)
     return s
 
 
@@ -123,13 +153,18 @@ def _scrivi_articolo(pdf: _PDF, art: Dict, analisi_extra: Optional[str] = None,
 
     # Testo completo dell'articolo (opzionale, scaricato dalla fonte)
     if testo_completo:
-        pdf.set_font("Helvetica", "B", 9)
-        pdf.set_text_color(*ACCENT)
-        pdf.riga("Testo completo", 5)
-        pdf.set_font("Helvetica", "", 9)
-        pdf.set_text_color(*INK)
-        pdf.riga(testo_completo, 5)
-        pdf.ln(1)
+        pulito = pulisci_testo_completo(testo_completo)
+        if pulito:
+            pdf.set_font("Helvetica", "B", 9)
+            pdf.set_text_color(*ACCENT)
+            pdf.riga("Testo completo", 5)
+            pdf.set_font("Helvetica", "I", 7)
+            pdf.set_text_color(*GREY)
+            pdf.riga("(estratto automatico dalla fonte; puo' contenere residui di menu)", 4)
+            pdf.set_font("Helvetica", "", 9)
+            pdf.set_text_color(*INK)
+            pdf.riga(pulito, 5)
+            pdf.ln(1)
 
     # Link
     link = art.get("link")
