@@ -991,6 +991,31 @@ def get_db() -> LegalRadarDB:
 
 db = get_db()
 
+# --- LEVA 2: CACHE DEI DATI STABILI ---
+# Cacho solo dati che cambiano di rado (fonti, temi, metriche), MAI dati "vivi"
+# come stato letto/salvato o contenuto articoli. ttl = scadenza in secondi: dopo
+# quel tempo la cache si rinfresca da sola, così le novità arrivano comunque.
+# Quando l'utente modifica le fonti, svuotiamo esplicitamente la cache (vedi più sotto).
+
+@st.cache_data(ttl=300)  # 5 min: i temi cambiano solo quando arrivano nuovi articoli
+def cache_lista_temi(tipo_atto):
+    return db.lista_temi(tipo_atto)
+
+@st.cache_data(ttl=300)  # 5 min: l'elenco fonti per categoria cambia di rado
+def cache_lista_fonti_per_tipo(tipo_atto, user_id):
+    return db.lista_fonti_per_tipo(tipo_atto, user_id)
+
+@st.cache_data(ttl=60)   # 1 min: le metriche dashboard possono aggiornarsi, ma non a ogni clic
+def cache_metriche_dashboard(user_id):
+    return db.estrai_metriche_dashboard(user_id)
+
+def svuota_cache_fonti():
+    """Da chiamare dopo modifiche alle fonti (aggiunta/rimozione/preferenze),
+    così i filtri si aggiornano subito invece di aspettare la scadenza."""
+    cache_lista_temi.clear()
+    cache_lista_fonti_per_tipo.clear()
+
+
 if 'user' not in st.session_state: st.session_state.user = None
 if 'ai_summaries' not in st.session_state: st.session_state.ai_summaries = {}
 if 'micro_riassunti' not in st.session_state: st.session_state.micro_riassunti = {}
@@ -2126,14 +2151,14 @@ elif pagina_pulita in ["📖 Leggi", "🏛️ Provvedimenti", "⚖️ Sentenze",
 
     # Filtri per tema, fonte e periodo, affiancati
     col_t, col_f, col_d = st.columns(3)
-    temi_disponibili = db.lista_temi(tipo_atto)
+    temi_disponibili = cache_lista_temi(tipo_atto)
     tema_sel = None
     with col_t:
         if temi_disponibili:
             scelta_tema = st.selectbox("Filtra per tema", ["Tutti i temi"] + temi_disponibili, key=f"tema_{tipo_atto}")
             if scelta_tema != "Tutti i temi":
                 tema_sel = scelta_tema
-    fonti_disponibili = db.lista_fonti_per_tipo(tipo_atto, st.session_state.user['id'])
+    fonti_disponibili = cache_lista_fonti_per_tipo(tipo_atto, st.session_state.user['id'])
     fonti_sel = None
     with col_f:
         if fonti_disponibili:
@@ -2267,6 +2292,7 @@ elif pagina_pulita == "⚙️ Gestione Fonti":
         is_on = col_toggle.toggle("Attivo", value=f['utente_attiva'], key=f"tog_{f['id']}")
         if is_on != f['utente_attiva']:
             db.imposta_preferenza_fonte(st.session_state.user['id'], f['id'], is_on)
+            svuota_cache_fonti()
             st.rerun()
             
     st.divider()
@@ -2291,6 +2317,7 @@ elif pagina_pulita == "⚙️ Gestione Fonti":
         if st.form_submit_button("➕ Salva Fonte nel Database Comune"):
             if n_nome and n_url:
                 if db.aggiungi_fonte(n_nome, n_url, n_area, n_macro, n_tipo_fonte, n_tipo_ingestion):
+                    svuota_cache_fonti()
                     st.success(f"Fonte '{n_nome}' registrata nel database globale!")
                     st.rerun()
                 else:
@@ -2320,9 +2347,11 @@ elif pagina_pulita == "⚙️ Gestione Fonti":
             )
             if nuovo_tipo != tipo_corrente:
                 db.imposta_tipo_fonte(f['id'], nuovo_tipo)
+                svuota_cache_fonti()
                 st.rerun()
             if col_b.button("Elimina", key=f"del_src_{f['id']}"):
                 db.rimuovi_fonte(f['id'])
+                svuota_cache_fonti()
                 st.success("Fonte rimossa dal sistema.")
                 st.rerun()
         else:
