@@ -37,7 +37,7 @@ def pulisci_testo_completo(testo: str) -> str:
     # Spezzo le parole "incollate" dei menu (minuscola seguita da maiuscola)
     s = _re.sub(r"([a-zà-ù])([A-ZÀ-Ù])", r"\1 \2", s)
     s = _re.sub(r"\s{2,}", " ", s).strip()
-    return s[:5000]  # taglio: il testo pieno può essere enorme
+    return s[:12000]  # taglio generoso; coerente con l'estrazione lato app
 
 
 def _t(testo) -> str:
