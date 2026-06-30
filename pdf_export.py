@@ -59,8 +59,10 @@ class _PDF(FPDF):
         self.multi_cell(larghezza, h, _t(testo))
 
 
-def _scrivi_articolo(pdf: _PDF, art: Dict, analisi_extra: Optional[str] = None) -> None:
-    """Scrive un blocco-articolo nel PDF: titolo, metadati, anteprima, analisi AI."""
+def _scrivi_articolo(pdf: _PDF, art: Dict, analisi_extra: Optional[str] = None,
+                     testo_completo: Optional[str] = None) -> None:
+    """Scrive un blocco-articolo nel PDF: titolo, metadati, anteprima, analisi AI,
+    e (opzionale) il testo completo dell'articolo."""
     # Categoria + fonte + data come riga di metadati
     tipo = _t(art.get("tipo_atto_eff") or art.get("tipo_atto") or "")
     fonte = _t(art.get("fonte") or "")
@@ -112,6 +114,16 @@ def _scrivi_articolo(pdf: _PDF, art: Dict, analisi_extra: Optional[str] = None) 
         pdf.riga(analisi_extra, 5)
         pdf.ln(1)
 
+    # Testo completo dell'articolo (opzionale, scaricato dalla fonte)
+    if testo_completo:
+        pdf.set_font("Helvetica", "B", 9)
+        pdf.set_text_color(*ACCENT)
+        pdf.riga("Testo completo", 5)
+        pdf.set_font("Helvetica", "", 9)
+        pdf.set_text_color(*INK)
+        pdf.riga(testo_completo, 5)
+        pdf.ln(1)
+
     # Link
     link = art.get("link")
     if link:
@@ -125,17 +137,24 @@ def _scrivi_articolo(pdf: _PDF, art: Dict, analisi_extra: Optional[str] = None) 
     pdf.ln(4)
 
 
-def pdf_singolo(art: Dict, analisi_extra: Optional[str] = None) -> bytes:
+def pdf_singolo(art: Dict, analisi_extra: Optional[str] = None,
+                testo_completo: Optional[str] = None) -> bytes:
     """PDF di un singolo articolo. Ritorna i byte."""
     pdf = _PDF()
     pdf.set_auto_page_break(auto=True, margin=18)
     pdf.add_page()
-    _scrivi_articolo(pdf, art, analisi_extra)
+    _scrivi_articolo(pdf, art, analisi_extra, testo_completo)
     return bytes(pdf.output())
 
 
-def pdf_rassegna(articoli: List[Dict], titolo_rassegna: str = "Rassegna dei salvati") -> bytes:
-    """PDF di una rassegna di articoli. Ritorna i byte."""
+def pdf_rassegna(articoli: List[Dict], titolo_rassegna: str = "Rassegna dei salvati",
+                 analisi_per_id: Optional[Dict] = None,
+                 testo_per_id: Optional[Dict] = None) -> bytes:
+    """PDF di una rassegna di articoli. Ritorna i byte.
+    analisi_per_id e testo_per_id: dizionari {id_articolo: testo} per allegare
+    a ciascun articolo la sua analisi AI e/o il suo testo completo."""
+    analisi_per_id = analisi_per_id or {}
+    testo_per_id = testo_per_id or {}
     pdf = _PDF()
     pdf.set_auto_page_break(auto=True, margin=18)
     pdf.add_page()
@@ -148,5 +167,8 @@ def pdf_rassegna(articoli: List[Dict], titolo_rassegna: str = "Rassegna dei salv
     pdf.riga(f"{len(articoli)} documenti - generato il " + datetime.now().strftime("%d/%m/%Y"), 5)
     pdf.ln(5)
     for art in articoli:
-        _scrivi_articolo(pdf, art)
+        aid = art.get("id")
+        _scrivi_articolo(pdf, art,
+                         analisi_extra=analisi_per_id.get(aid),
+                         testo_completo=testo_per_id.get(aid))
     return bytes(pdf.output())
