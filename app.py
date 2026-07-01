@@ -1081,11 +1081,12 @@ st.markdown("""
 
     /* ---- CARD ATTI (lista sezioni) ---- */
     .radar-card{
-        background:var(--surface); border-radius:18px; padding:22px 26px;
-        box-shadow:0 1px 3px rgba(0,0,0,.04), 0 6px 22px rgba(0,0,0,.045);
-        margin-bottom:14px; transition:transform .2s, box-shadow .2s;
+        background:var(--surface); border-radius:20px; padding:24px 28px;
+        box-shadow:0 1px 2px rgba(0,0,0,.03);
+        margin-bottom:16px; transition:transform .18s, box-shadow .18s;
+        border:0.5px solid rgba(0,0,0,.04);
     }
-    .radar-card:hover{ transform:translateY(-2px); box-shadow:0 2px 6px rgba(0,0,0,.06), 0 12px 34px rgba(0,0,0,.08); }
+    .radar-card:hover{ transform:translateY(-1px); box-shadow:0 4px 20px rgba(0,0,0,.07); }
     .radar-card.letta{ opacity:.55; }
 
     .card-title{
@@ -1095,18 +1096,18 @@ st.markdown("""
     .card-title:hover{ color:var(--accent); }
     .card-preview{ margin-top:11px; font-size:14.5px; line-height:1.55; color:var(--ink-soft); }
     .card-microsummary{
-        margin-top:11px; font-size:14px; line-height:1.55; color:var(--ink-soft);
-        background:var(--accent-soft); border-radius:12px; padding:11px 15px;
+        margin-top:14px; font-size:14px; line-height:1.6; color:var(--ink-soft);
+        border-left:2px solid var(--accent); padding:3px 0 3px 15px;
     }
 
     /* badge a pillola */
     .meta-tag{
-        display:inline-block; font-size:11.5px; font-weight:600; letter-spacing:.2px;
-        padding:4px 11px; border-radius:980px; margin-right:7px; vertical-align:middle;
+        display:inline-block; font-size:11.5px; font-weight:500; letter-spacing:.2px;
+        padding:4px 12px; border-radius:980px; margin-right:6px; vertical-align:middle;
     }
-    .tag-area{ background:rgba(0,0,0,.05); color:var(--ink-soft); }
-    .tag-fonte{ background:rgba(0,0,0,.05); color:var(--ink-soft); }
-    .tag-rango{ background:rgba(0,0,0,.04); color:var(--ink-faint); }
+    .tag-area{ background:rgba(0,0,0,.04); color:var(--ink-soft); }
+    .tag-fonte{ background:rgba(0,0,0,.04); color:var(--ink-soft); }
+    .tag-rango{ background:transparent; color:var(--ink-faint); padding-left:2px; }
     .badge-ril{ font-size:11.5px; font-weight:600; padding:4px 11px; border-radius:980px; }
     .badge-ril-alta{ background:var(--alta-soft); color:var(--alta); }
     .badge-ril-media{ background:rgba(0,0,0,.05); color:var(--ink-soft); }
@@ -1140,21 +1141,22 @@ st.markdown("""
     }
 
     /* ---- DASHBOARD PRIMA PAGINA ---- */
-    .pp-hero-eyebrow{ font-size:13px; font-weight:600; color:var(--ink-soft); letter-spacing:.2px; }
+    .pp-hero-eyebrow{ font-size:12px; font-weight:600; color:var(--accent); letter-spacing:.4px; text-transform:uppercase; }
+    .pp-hero-eyebrow::before{ content:""; display:inline-block; width:6px; height:6px; border-radius:50%; background:var(--accent); margin-right:8px; vertical-align:middle; }
     .pp-hero-title{
-        font-family:'Newsreader',serif; font-weight:500; font-size:40px; line-height:1.13;
-        letter-spacing:-0.5px; color:var(--ink); text-decoration:none; display:block; margin:10px 0 0;
+        font-family:'Newsreader',serif; font-weight:500; font-size:43px; line-height:1.12;
+        letter-spacing:-0.6px; color:var(--ink); text-decoration:none; display:block; margin:12px 0 0;
     }
     .pp-hero-title:hover{ color:var(--accent); }
     .pp-hero-sub{ margin-top:16px; font-size:17px; line-height:1.55; color:var(--ink-soft); }
     .pp-hero-row{ margin-top:22px; }
 
     .pp-card{
-        background:var(--surface); border-radius:18px; padding:22px 24px; height:100%;
-        box-shadow:0 1px 3px rgba(0,0,0,.04), 0 6px 22px rgba(0,0,0,.045);
-        transition:transform .2s, box-shadow .2s;
+        background:var(--surface); border-radius:20px; padding:24px 26px; height:100%;
+        box-shadow:0 1px 2px rgba(0,0,0,.03); border:0.5px solid rgba(0,0,0,.04);
+        transition:transform .18s, box-shadow .18s;
     }
-    .pp-card:hover{ transform:translateY(-2px); box-shadow:0 2px 6px rgba(0,0,0,.06), 0 12px 34px rgba(0,0,0,.08); }
+    .pp-card:hover{ transform:translateY(-1px); box-shadow:0 4px 20px rgba(0,0,0,.07); }
     .pp-card-title{
         font-family:'Newsreader',serif; font-weight:500; font-size:20px; line-height:1.28;
         letter-spacing:-0.2px; color:var(--ink); text-decoration:none; display:block; margin:13px 0 0;
