@@ -1233,7 +1233,7 @@ def estrai_testo_pulito(url: str) -> str:
         res = requests.get(url, headers=headers, timeout=6)
         soup = BeautifulSoup(res.text, 'html.parser')
         paragraphs = soup.find_all(['p', 'div'])
-        return " ".join([p.get_text(strip=True) for p in paragraphs if len(p.get_text(strip=True)) > 45])[:6000]
+        return " ".join([p.get_text(strip=True) for p in paragraphs if len(p.get_text(strip=True)) > 45])[:12000]
     except: return ""
 
 def estrai_testo_completo(url: str) -> str:
@@ -1265,6 +1265,29 @@ def estrai_testo_completo(url: str) -> str:
         return ""
 
 # --- MODIFICA: POTENZIAMENTO PROMPT AI VERTICALE (Punto 2) ---
+def formatta_analisi_html(testo: str) -> str:
+    """Trasforma l'analisi AI (testo semplice con titoli in MAIUSCOLO) in HTML
+    coerente col design: titoli di sezione in mono uppercase arancione
+    (classe .report-sec-h gia' nel CSS), paragrafi e elenchi puliti."""
+    TITOLI = {"INQUADRAMENTO", "EXECUTIVE SUMMARY", "ANALISI GIURIDICA",
+              "IMPATTO SUI COMPARATORI ONLINE", "AZIONI SUGGERITE",
+              "ANALISI LEGALE", "IMPATTO COMPARATORI ONLINE"}  # anche i vecchi titoli
+    blocchi = []
+    for riga in (testo or "").split("\n"):
+        r = riga.strip()
+        if not r:
+            continue
+        # riconosco i titoli anche con numerazione o simboli residui
+        r_puro = r.strip("0123456789).:- ").upper()
+        if r_puro in TITOLI:
+            blocchi.append(f"<div class='report-sec-h' style='margin-top:14px;'>{html.escape(r_puro)}</div>")
+        elif r.startswith("- ") or r.startswith("• "):
+            blocchi.append(f"<div style='font-size:14px; line-height:1.6; color:var(--ink-soft); padding-left:14px;'>&ndash; {html.escape(r[2:])}</div>")
+        else:
+            blocchi.append(f"<div style='font-size:14px; line-height:1.6; color:var(--ink-soft); margin-top:4px;'>{html.escape(r)}</div>")
+    return "".join(blocchi)
+
+
 def genera_sintesi_groq(url: str, preview_text: str) -> str:
     raw_key = st.secrets.get("GROQ_API_KEY", "").strip()
     if not raw_key.startswith("gsk_"): return "⚠️ Configura la chiave GROQ_API_KEY nei Secrets."
@@ -1276,14 +1299,40 @@ def genera_sintesi_groq(url: str, preview_text: str) -> str:
     headers = {"Authorization": f"Bearer {raw_key}", "Content-Type": "application/json"}
     
     system_prompt = (
-        "Sei un Senior Legal Counsel esperto di compliance e mercati digitali, specializzato nel settore dei "
-        "comparatori online e aggregatori di tariffe in Italia (es. Facile.it, Segugio.it). "
-        "Analizza il testo fornito ed elabora un report strutturato rigorosamente in lingua italiana diviso in tre sezioni precise:\n\n"
-        "1) 📝 EXECUTIVE SUMMARY: Una sintesi chiarissima del nucleo normativo o giuridico dell'atto (max 2 frasi).\n"
-        "2) ⚖️ ANALISI LEGALE: I profili di rischio, gli obblighi o le opportunità giuridiche emergenti dall'atto.\n"
-        "3) 🚀 IMPATTO COMPARATORI ONLINE: Una valutazione verticale di come questa novità impatti specificamente sull'operatività, "
-        "sul business, sul marketing o sulla compliance dei siti di comparazione tariffe/assicurazioni/finanza in Italia.\n\n"
-        "Sii autorevole, schematico e pragmatico."
+        "Sei un Senior Legal Counsel italiano con 20 anni di esperienza in diritto dei mercati digitali, "
+        "protezione dei dati, diritto assicurativo e bancario, e compliance. Lavori per il team legale interno "
+        "di un gruppo che opera nel settore dei comparatori online e aggregatori di tariffe in Italia "
+        "(finanza, assicurazioni, utility - es. Facile.it, Segugio.it). I tuoi lettori sono giuristi: "
+        "usa un linguaggio tecnico-professionale, preciso e asciutto, in italiano.\n\n"
+        "Analizza il testo fornito ed elabora un parere strutturato ESATTAMENTE in queste cinque sezioni:\n\n"
+        "INQUADRAMENTO\n"
+        "Natura dell'atto (legge, provvedimento, sentenza, parere, comunicato...), autorita' o organo emittente, "
+        "ambito di applicazione soggettivo e oggettivo, e - se desumibili dal testo - date di entrata in vigore, "
+        "decorrenze o termini. Massimo 3 frasi.\n\n"
+        "EXECUTIVE SUMMARY\n"
+        "Il nucleo della novita' in 2-3 frasi, per chi ha trenta secondi. Cosa cambia e per chi.\n\n"
+        "ANALISI GIURIDICA\n"
+        "L'analisi approfondita da giurista: il quadro normativo in cui l'atto si inserisce (es. GDPR, Codice del Consumo, "
+        "Codice Privacy, IDD, TUB, normativa AGCOM/IVASS/Banca d'Italia, AI Act - SOLO se effettivamente pertinenti), "
+        "gli obblighi che ne derivano e per quali soggetti, i profili di rischio e le eventuali sanzioni, "
+        "gli orientamenti interpretativi che l'atto consolida o modifica. Distingui sempre cio' che l'atto DICE "
+        "da cio' che e' tua valutazione professionale (usa 'a mio avviso' o 'si ritiene' per le valutazioni).\n\n"
+        "IMPATTO SUI COMPARATORI ONLINE\n"
+        "Valutazione verticale e concreta: come questa novita' tocca l'operativita', il funnel commerciale, il marketing, "
+        "il trattamento dati e la compliance dei siti di comparazione tariffe/assicurazioni/finanza in Italia. "
+        "Se l'impatto e' nullo o marginale, dillo chiaramente senza gonfiarlo.\n\n"
+        "AZIONI SUGGERITE\n"
+        "Da 2 a 4 azioni concrete e prioritizzate per il team legale (es. 'verificare l'informativa X', "
+        "'monitorare la conversione in legge', 'aggiornare la clausola Y'). Se non servono azioni, scrivi 'Nessuna azione immediata richiesta'.\n\n"
+        "REGOLE DI RIGORE (vincolanti):\n"
+        "- NON inventare mai riferimenti normativi, numeri di articoli, date o estremi di atti: cita solo cio' che e' "
+        "presente nel testo o che conosci con certezza. Nel dubbio, resta generico ('la normativa privacy applicabile') "
+        "piuttosto che citare un estremo incerto.\n"
+        "- Se il testo fornito e' troppo scarno per un'analisi affidabile, dillo apertamente nella sezione ANALISI GIURIDICA "
+        "e limita le conclusioni di conseguenza.\n"
+        "- Non usare markdown (niente asterischi o cancelletti) ne' emoji: i titoli delle sezioni vanno scritti "
+        "in MAIUSCOLO su riga propria, il resto e' testo semplice con eventuali elenchi puntati con trattino.\n"
+        "- Sii autorevole ma onesto: un buon parere dice anche cosa NON si puo' concludere dal testo disponibile."
     )
     
     payload = {
@@ -1292,10 +1341,11 @@ def genera_sintesi_groq(url: str, preview_text: str) -> str:
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": f"Testo da analizzare:\n\n{input_ai}"}
         ],
-        "temperature": 0.2
+        "temperature": 0.2,
+        "max_tokens": 2200
     }
     try:
-        r = requests.post(api_url, headers=headers, json=payload, timeout=15)
+        r = requests.post(api_url, headers=headers, json=payload, timeout=30)
         if r.status_code == 200: return r.json()['choices'][0]['message']['content'].strip()
         return f"⚠️ Errore AI ({r.status_code})"
     except: return "⚠️ Connessione AI fallita."
@@ -1772,8 +1822,8 @@ def mostra_hub_legale(lista_articoli: List[Dict], tipo_bacheca: str):
                                        key=f"dlpdf_{art['id']}", use_container_width=True)
             # Se l'analisi esiste (appena generata o già presente), la mostro sotto la card
             if link in st.session_state.ai_summaries:
-                st.markdown("<div style='font-size:13px; font-weight:600; color:var(--accent); margin-top:6px;'>✦ Analisi strategica</div>", unsafe_allow_html=True)
-                st.markdown(st.session_state.ai_summaries[link])
+                analisi_html = formatta_analisi_html(st.session_state.ai_summaries[link])
+                st.markdown(f"<div style='border-left:3px solid var(--accent); padding:6px 0 6px 18px; margin-top:10px;'><div class='report-sec-h'>ANALISI DEL LEGAL COUNSEL AI</div>{analisi_html}</div>", unsafe_allow_html=True)
 
             # Banner di rimando ai report del Radar collegati a questa notizia
             if tipo_bacheca != "bookmarks":
