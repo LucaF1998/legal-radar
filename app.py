@@ -200,6 +200,14 @@ class LegalRadarDB:
             "ALTER TABLE sources ADD COLUMN IF NOT EXISTS ultima_sync TIMESTAMP",
             "ALTER TABLE sources ADD COLUMN IF NOT EXISTS ultimo_esito VARCHAR(20)",
             "ALTER TABLE sources ADD COLUMN IF NOT EXISTS ultimo_messaggio TEXT",
+            "ALTER TABLE articles ADD COLUMN IF NOT EXISTS analisi_ai TEXT",
+            """CREATE TABLE IF NOT EXISTS user_article_analysis (
+                user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+                article_id INTEGER REFERENCES articles(id) ON DELETE CASCADE,
+                analisi TEXT,
+                generata_il TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (user_id, article_id)
+            )""",
             "ALTER TABLE articles ADD COLUMN IF NOT EXISTS riassunto_ai TEXT",
             "ALTER TABLE articles ADD COLUMN IF NOT EXISTS rilevanza VARCHAR(20)",
             "ALTER TABLE articles ADD COLUMN IF NOT EXISTS tipo_atto VARCHAR(30)",
@@ -478,6 +486,18 @@ class LegalRadarDB:
                 (riassunto[:600] if riassunto else None, rilevanza, article_id)
             )
 
+    def salva_analisi_utente(self, user_id: int, article_id: int, analisi: str) -> None:
+        """Persiste l'analisi legale AI DELL'UTENTE: personale, sopravvive alle sessioni,
+        ma non compare agli altri utenti. Rigenerabile sovrascrivendo."""
+        with self.get_cursor() as cur:
+            cur.execute(
+                """INSERT INTO user_article_analysis (user_id, article_id, analisi)
+                   VALUES (%s, %s, %s)
+                   ON CONFLICT (user_id, article_id) DO UPDATE
+                   SET analisi = EXCLUDED.analisi, generata_il = CURRENT_TIMESTAMP""",
+                (user_id, article_id, analisi)
+            )
+
     # --- MODIFICA: ESTRAZIONE ARCHIVIO FILTRATO SULLE PREFERENZE UTENTE + STATO LETTO ---
     def estrai_archivio(self, filtro_macro: str, user_id: int, ricerca_testo: str = "") -> List[Dict]:
         query = """
@@ -511,6 +531,7 @@ class LegalRadarDB:
         rispettando le fonti spente dall'utente e portando stato letto + tipo fonte."""
         query = """
             SELECT a.*, COALESCE(uas.letto, FALSE) AS letto, src.tipo_fonte,
+                   uaa.analisi AS analisi_personale,
                    CASE
                        WHEN LOWER(COALESCE(src.tipo_fonte,'')) = 'editoriale' THEN 'news'
                        ELSE COALESCE(a.tipo_atto, 'provvedimento')
@@ -518,6 +539,8 @@ class LegalRadarDB:
             FROM articles a
             LEFT JOIN user_article_status uas
                 ON uas.article_id = a.id AND uas.user_id = %s
+            LEFT JOIN user_article_analysis uaa
+                ON uaa.article_id = a.id AND uaa.user_id = %s
             LEFT JOIN sources src ON src.nome = a.fonte
             WHERE CASE
                       WHEN LOWER(COALESCE(src.tipo_fonte,'')) = 'editoriale' THEN 'news'
@@ -529,7 +552,7 @@ class LegalRadarDB:
                 WHERE usp.user_id = %s AND usp.is_active = FALSE
             )
         """
-        params = [user_id, tipo_atto, user_id]
+        params = [user_id, user_id, tipo_atto, user_id]
         if tema:
             query += " AND a.tema = %s"
             params.append(tema)
@@ -635,22 +658,43 @@ class LegalRadarDB:
         )"""
 
     def estrai_in_evidenza(self, user_id: int, limite: int = 4) -> List[Dict]:
-        """Articoli per apertura + griglia: priorità ad alta rilevanza e non letti, poi recenti."""
+        """Articoli per apertura + griglia. ROTAZIONE GIORNALIERA: pesca da un pool
+        recente (30 giorni) con una chiave pseudo-casuale stabile per il giorno
+        (md5(id+data)): ogni giorno la selezione cambia, ma resta ferma durante la
+        giornata. Il merito è preservato: prima i non letti, tra questi prima
+        l'alta rilevanza, e la rotazione mescola a parità di fascia."""
         query = f"""
             SELECT a.*, COALESCE(uas.letto, FALSE) AS letto, src.tipo_fonte
             FROM articles a
             LEFT JOIN user_article_status uas ON uas.article_id = a.id AND uas.user_id = %s
             LEFT JOIN sources src ON src.nome = a.fonte
             WHERE {self._filtro_fonti_attive(user_id)}
+              AND COALESCE(a.data_pubblicazione, a.data_scansione::date) >= CURRENT_DATE - INTERVAL '30 days'
             ORDER BY
-                CASE WHEN a.rilevanza = 'alta' THEN 0 ELSE 1 END,
                 COALESCE(uas.letto, FALSE) ASC,
-                COALESCE(a.data_pubblicazione, a.data_scansione) DESC
+                CASE WHEN a.rilevanza = 'alta' THEN 0 ELSE 1 END,
+                md5(a.id::text || CURRENT_DATE::text)
             LIMIT %s
         """
         with self.get_cursor(dict_cursor=True) as cur:
             cur.execute(query, (user_id, user_id, limite))
             righe = cur.fetchall()
+            if len(righe) < limite:
+                # Fallback: archivio scarno negli ultimi 30 giorni -> senza finestra
+                query_fb = f"""
+                    SELECT a.*, COALESCE(uas.letto, FALSE) AS letto, src.tipo_fonte
+                    FROM articles a
+                    LEFT JOIN user_article_status uas ON uas.article_id = a.id AND uas.user_id = %s
+                    LEFT JOIN sources src ON src.nome = a.fonte
+                    WHERE {self._filtro_fonti_attive(user_id)}
+                    ORDER BY
+                        COALESCE(uas.letto, FALSE) ASC,
+                        CASE WHEN a.rilevanza = 'alta' THEN 0 ELSE 1 END,
+                        md5(a.id::text || CURRENT_DATE::text)
+                    LIMIT %s
+                """
+                cur.execute(query_fb, (user_id, user_id, limite))
+                righe = cur.fetchall()
         return [dict(r) for r in righe]
 
     def estrai_ultima_ora(self, user_id: int, limite: int = 5) -> List[Dict]:
@@ -669,26 +713,46 @@ class LegalRadarDB:
         return [dict(r) for r in righe]
 
     def estrai_per_tema_blocco(self, user_id: int, tema: str, limite: int = 3) -> List[Dict]:
-        """Ultimi articoli di un tema specifico, per i blocchi tematici."""
+        """Articoli di un tema per i blocchi della dashboard, con ROTAZIONE GIORNALIERA
+        sul pool recente (30 giorni): ogni giorno il blocco propone articoli diversi."""
         query = f"""
             SELECT a.*, src.tipo_fonte
             FROM articles a
             LEFT JOIN sources src ON src.nome = a.fonte
             WHERE a.tema = %s AND {self._filtro_fonti_attive(user_id)}
-            ORDER BY COALESCE(a.data_pubblicazione, a.data_scansione) DESC
+              AND COALESCE(a.data_pubblicazione, a.data_scansione::date) >= CURRENT_DATE - INTERVAL '30 days'
+            ORDER BY md5(a.id::text || CURRENT_DATE::text)
             LIMIT %s
         """
         with self.get_cursor(dict_cursor=True) as cur:
             cur.execute(query, (tema, user_id, limite))
             righe = cur.fetchall()
+            if len(righe) < limite:
+                # Fallback: tema con poco materiale recente -> gli ultimi in assoluto
+                query_fb = f"""
+                    SELECT a.*, src.tipo_fonte
+                    FROM articles a
+                    LEFT JOIN sources src ON src.nome = a.fonte
+                    WHERE a.tema = %s AND {self._filtro_fonti_attive(user_id)}
+                    ORDER BY COALESCE(a.data_pubblicazione, a.data_scansione) DESC
+                    LIMIT %s
+                """
+                cur.execute(query_fb, (tema, user_id, limite))
+                righe = cur.fetchall()
         return [dict(r) for r in righe]
 
     def temi_piu_presenti(self, user_id: int, limite: int = 3) -> List[str]:
-        """I temi (normalizzati) con più articoli, per scegliere i blocchi tematici della dashboard."""
+        """Temi per i blocchi della dashboard. ROTAZIONE GIORNALIERA: il conteggio
+        guarda solo agli ultimi 30 giorni (temi 'caldi', non lo storico eterno) e
+        la scelta ruota ogni giorno tra i temi con più materiale, così i blocchi
+        cambiano invece di mostrare per sempre gli stessi tre."""
+        import hashlib
+        from datetime import date
         query = f"""
             SELECT a.tema, COUNT(*) AS n
             FROM articles a
             WHERE a.tema IS NOT NULL AND {self._filtro_fonti_attive(user_id)}
+              AND COALESCE(a.data_pubblicazione, a.data_scansione::date) >= CURRENT_DATE - INTERVAL '30 days'
             GROUP BY a.tema
         """
         with self.get_cursor(dict_cursor=True) as cur:
@@ -699,8 +763,13 @@ class LegalRadarDB:
         for r in righe:
             canon = normalizza_tema(r['tema'])
             conteggi[canon] = conteggi.get(canon, 0) + r['n']
+        # Candidati: i temi recenti con almeno 2 articoli (blocchi non vuoti),
+        # tenendo al massimo i primi 8 per volume. Poi rotazione giornaliera.
         ordinati = sorted(conteggi.items(), key=lambda x: x[1], reverse=True)
-        return [t for t, _ in ordinati[:limite]]
+        candidati = [t for t, n in ordinati if n >= 2][:8] or [t for t, _ in ordinati[:limite]]
+        oggi = date.today().isoformat()
+        ruotati = sorted(candidati, key=lambda t: hashlib.md5((t + oggi).encode()).hexdigest())
+        return ruotati[:limite]
 
     def aggiungi_bookmark(self, user_id: int, article_id: int) -> None:
         try:
@@ -715,15 +784,18 @@ class LegalRadarDB:
 
     def estrai_bookmarks(self, user_id: int, ricerca_testo: str = "") -> List[Dict]:
         query = """
-            SELECT a.*, COALESCE(uas.letto, FALSE) AS letto, src.tipo_fonte
+            SELECT a.*, COALESCE(uas.letto, FALSE) AS letto, src.tipo_fonte,
+                   uaa.analisi AS analisi_personale
             FROM articles a 
             JOIN bookmarks b ON a.id = b.article_id 
             LEFT JOIN user_article_status uas
                 ON uas.article_id = a.id AND uas.user_id = %s
+            LEFT JOIN user_article_analysis uaa
+                ON uaa.article_id = a.id AND uaa.user_id = %s
             LEFT JOIN sources src ON src.nome = a.fonte
             WHERE b.user_id = %s
         """
-        params = [user_id, user_id]
+        params = [user_id, user_id, user_id]
         if ricerca_testo:
             query += " AND (a.titolo ILIKE %s OR a.preview ILIKE %s)"
             text_param = f"%{ricerca_testo}%"
@@ -1804,12 +1876,18 @@ def _card_articolo(art: Dict, tipo_bacheca: str):
                     st.rerun(scope="fragment")
             else:
                 st.button("Letto ✓", key=f"readd_{art['id']}", use_container_width=True, disabled=True)
+        # L'analisi disponibile: prima dal DB (persistita), poi dalla sessione (appena generata)
+        analisi_disponibile = art.get('analisi_personale') or st.session_state.ai_summaries.get(link)
         with b3:
-            # Mostro il bottone Analisi solo se non già generata
-            if link not in st.session_state.ai_summaries:
+            # Mostro il bottone Analisi solo se non esiste ancora (né in DB né in sessione)
+            if not analisi_disponibile:
                 if st.button("✦ Analisi AI", key=f"ai_{art['id']}", use_container_width=True):
                     with st.spinner("Analisi in corso…"):
-                        st.session_state.ai_summaries[link] = genera_sintesi_groq(link, art['preview'])
+                        analisi_nuova = genera_sintesi_groq(link, art['preview'])
+                        st.session_state.ai_summaries[link] = analisi_nuova
+                        # PERSISTENZA: salvo nel DB, così è pronta per sempre e per tutti
+                        if analisi_nuova and not analisi_nuova.startswith("⚠️"):
+                            db.salva_analisi_utente(st.session_state.user['id'], art['id'], analisi_nuova)
                         if not art.get('riassunto_ai') and art['id'] not in st.session_state.micro_riassunti:
                             meta = genera_microriassunto_groq(art.get('titolo',''), art.get('preview',''))
                             if meta['riassunto']:
@@ -1819,26 +1897,27 @@ def _card_articolo(art: Dict, tipo_bacheca: str):
                         st.session_state.letti_sessione.add(art['id'])
                     st.rerun(scope="fragment")
         with b4:
-            # PDF del singolo articolo: lo preparo al clic (genero l'analisi AI
-            # se manca), poi mostro il download.
+            # PDF del singolo articolo: se l'analisi è già persistita, la generazione
+            # è istantanea; altrimenti genero l'analisi (e la salvo) al momento.
             stato_pdf = st.session_state.setdefault('pdf_singolo_pronti', {})
             if art['id'] not in stato_pdf:
                 if st.button("⬇ Prepara PDF", key=f"preppdf_{art['id']}", use_container_width=True):
                     with st.spinner("Preparo il PDF…"):
-                        # Analisi: uso quella in sessione, o la genero ora se manca
-                        analisi = st.session_state.ai_summaries.get(link)
+                        analisi = analisi_disponibile
                         if not analisi:
                             analisi = genera_sintesi_groq(link, art.get('preview', ''))
                             st.session_state.ai_summaries[link] = analisi
+                            if analisi and not analisi.startswith("⚠️"):
+                                db.salva_analisi_utente(st.session_state.user['id'], art['id'], analisi)
                         stato_pdf[art['id']] = pdf_export.pdf_singolo(art, analisi_extra=analisi)
                     st.rerun(scope="fragment")
             else:
                 st.download_button("⬇ Scarica PDF", data=stato_pdf[art['id']],
                                    file_name=f"articolo_{art['id']}.pdf", mime="application/pdf",
                                    key=f"dlpdf_{art['id']}", use_container_width=True)
-        # Se l'analisi esiste (appena generata o già presente), la mostro sotto la card
-        if link in st.session_state.ai_summaries:
-            analisi_html = formatta_analisi_html(st.session_state.ai_summaries[link])
+        # Se l'analisi esiste (persistita o appena generata), la mostro sotto la card
+        if analisi_disponibile:
+            analisi_html = formatta_analisi_html(analisi_disponibile)
             st.markdown(f"<div style='border-left:3px solid var(--accent); padding:6px 0 6px 18px; margin-top:10px;'><div class='report-sec-h'>ANALISI DEL LEGAL COUNSEL AI</div>{analisi_html}</div>", unsafe_allow_html=True)
 
         # Banner di rimando ai report del Radar collegati a questa notizia
@@ -2322,10 +2401,13 @@ elif pagina_pulita == "🔖 I Miei Salvati":
                     tot = len(dati_salvati)
                     for i, art in enumerate(dati_salvati):
                         link_a = art.get('link', '')
-                        # Analisi: quella in sessione, o salvata, o generata ora
-                        analisi = st.session_state.ai_summaries.get(link_a)
+                        # Analisi: prima dal DB (persistita), poi sessione, altrimenti genero e SALVO
+                        analisi = art.get('analisi_personale') or st.session_state.ai_summaries.get(link_a)
                         if not analisi and not art.get('riassunto_ai'):
                             analisi = genera_sintesi_groq(link_a, art.get('preview', ''))
+                            if analisi and not analisi.startswith("⚠️"):
+                                db.salva_analisi_utente(st.session_state.user['id'], art['id'], analisi)
+                                st.session_state.ai_summaries[link_a] = analisi
                         if analisi:
                             analisi_map[art['id']] = analisi
                         barra.progress((i + 1) / tot, text=f"Elaborato {i+1} di {tot}…")
