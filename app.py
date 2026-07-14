@@ -1019,6 +1019,8 @@ def svuota_cache_fonti():
 if 'user' not in st.session_state: st.session_state.user = None
 if 'ai_summaries' not in st.session_state: st.session_state.ai_summaries = {}
 if 'micro_riassunti' not in st.session_state: st.session_state.micro_riassunti = {}
+if 'letti_sessione' not in st.session_state: st.session_state.letti_sessione = set()
+if 'rimossi_sessione' not in st.session_state: st.session_state.rimossi_sessione = set()
 
 # --- 3. STILE GRAFICO ---
 st.markdown("""
@@ -1726,136 +1728,174 @@ def mostra_hub_legale(lista_articoli: List[Dict], tipo_bacheca: str):
     if not lista_articoli:
         st.info("Nessun articolo trovato in questo archivio storico filtrato.")
         return
-        
     for art in lista_articoli:
-        with st.container():
-            e_letto = art.get('letto', False)
-            classe_card = "radar-card letta" if e_letto else "radar-card"
-            badge_nuovo = "" if e_letto else '<span class="badge-nuovo">Nuovo</span>'
-            # Escape di tutti i testi: evita che contenuti con caratteri HTML (es. < > nel riassunto AI) rompano la card
-            e_area = html.escape(str(art.get('area') or ''))
-            e_fonte = html.escape(str(art.get('fonte') or ''))
-            e_titolo = html.escape(str(art.get('titolo') or ''))
-            e_preview = html.escape(str(art.get('preview') or ''))
-            e_link = html.escape(str(art.get('link') or ''), quote=True)
-            # Badge categoria pastello (Legge/Provvedimento/Sentenza/News)
-            sc = _stile_categoria(art.get('tipo_atto'))
-            badge_cat = f'<span class="cat-badge cat-{sc["cls_badge"]}">{sc["label"]}</span>'
-            # Data dell'atto: la pubblicazione reale se disponibile, altrimenti la scansione
-            data_rif = art.get('data_pubblicazione') or art.get('data_scansione')
-            data_str = data_rif.strftime('%d/%m/%Y') if data_rif else ''
-            tag_data = f'<span class="meta-tag tag-rango">{data_str}</span>' if data_str else ''
-            # Tag tema (dall'AI): se assente, ripiega sull'area manuale
-            tema = art.get('tema') or art.get('area')
-            tag_tema = f'<span class="meta-tag tag-area">{html.escape(str(tema))}</span>' if tema else ''
-            # Badge rilevanza (solo priorità visiva, non nasconde nulla)
-            rilevanza = art.get('rilevanza')
-            if rilevanza == "alta":
-                badge_ril = '<span class="badge-ril badge-ril-alta">Alta</span>'
-            else:
-                badge_ril = ''
-            # Micro-riassunto AI sotto il titolo: dal DB, o da quello appena generato in sessione
-            riassunto = art.get('riassunto_ai') or st.session_state.get('micro_riassunti', {}).get(art['id'])
-            blocco_riassunto = f'<div class="card-microsummary">✦ {html.escape(str(riassunto))}</div>' if riassunto else ''
-            card_html = (
-                f'<div class="{classe_card}">'
-                f'<div>{badge_cat}{badge_ril}<span class="meta-tag tag-fonte">{e_fonte}</span>'
-                f'{tag_tema}{tag_data}</div>'
-                f'<a href="{e_link}" target="_blank" class="card-title">{e_titolo}{badge_nuovo}</a>'
-                f'{blocco_riassunto}'
-                f'<div class="card-preview">{e_preview}</div>'
-                f'</div>'
-            )
-            st.markdown(card_html, unsafe_allow_html=True)
-            link = art['link']
-            # Bottoni azione: pillole compatte e ravvicinate (l'ultima colonna vuota le tiene strette a sinistra)
-            b1, b2, b3, b4, _sp = st.columns([1, 1, 1, 1, 1])
-            with b1:
-                if tipo_bacheca == "bookmarks":
-                    if st.button("Rimuovi", key=f"rem_{art['id']}", use_container_width=True):
-                        db.rimuovi_bookmark(st.session_state.user['id'], art['id'])
-                        st.rerun()
-                else:
-                    if db.check_bookmark_esiste(st.session_state.user['id'], art['id']):
-                        st.button("Salvato ✓", key=f"saved_{art['id']}", use_container_width=True, disabled=True)
-                    else:
-                        if st.button("Salva", key=f"save_{art['id']}", use_container_width=True):
-                            db.aggiungi_bookmark(st.session_state.user['id'], art['id'])
-                            st.rerun()
-            with b2:
-                if not e_letto:
-                    if st.button("Segna letto", key=f"read_{art['id']}", use_container_width=True):
-                        db.segna_letto(st.session_state.user['id'], art['id'])
-                        st.rerun()
-                else:
-                    st.button("Letto ✓", key=f"readd_{art['id']}", use_container_width=True, disabled=True)
-            with b3:
-                # Mostro il bottone Analisi solo se non già generata
-                if link not in st.session_state.ai_summaries:
-                    if st.button("✦ Analisi AI", key=f"ai_{art['id']}", use_container_width=True):
-                        with st.spinner("Analisi in corso…"):
-                            st.session_state.ai_summaries[link] = genera_sintesi_groq(link, art['preview'])
-                            if not art.get('riassunto_ai') and art['id'] not in st.session_state.micro_riassunti:
-                                meta = genera_microriassunto_groq(art.get('titolo',''), art.get('preview',''))
-                                if meta['riassunto']:
-                                    st.session_state.micro_riassunti[art['id']] = meta['riassunto']
-                                    db.aggiorna_riassunto_articolo(art['id'], meta['riassunto'], meta['rilevanza'])
-                            db.segna_letto(st.session_state.user['id'], art['id'])
-                        # niente st.rerun(): mostro il risultato qui sotto, nello stesso ciclo
-            with b4:
-                # PDF del singolo articolo: lo preparo al clic (genero l'analisi AI
-                # se manca), poi mostro il download.
-                stato_pdf = st.session_state.setdefault('pdf_singolo_pronti', {})
-                if art['id'] not in stato_pdf:
-                    if st.button("⬇ Prepara PDF", key=f"preppdf_{art['id']}", use_container_width=True):
-                        with st.spinner("Preparo il PDF…"):
-                            # Analisi: uso quella in sessione, o la genero ora se manca
-                            analisi = st.session_state.ai_summaries.get(link)
-                            if not analisi:
-                                analisi = genera_sintesi_groq(link, art.get('preview', ''))
-                                st.session_state.ai_summaries[link] = analisi
-                            stato_pdf[art['id']] = pdf_export.pdf_singolo(art, analisi_extra=analisi)
-                        st.rerun()
-                else:
-                    st.download_button("⬇ Scarica PDF", data=stato_pdf[art['id']],
-                                       file_name=f"articolo_{art['id']}.pdf", mime="application/pdf",
-                                       key=f"dlpdf_{art['id']}", use_container_width=True)
-            # Se l'analisi esiste (appena generata o già presente), la mostro sotto la card
-            if link in st.session_state.ai_summaries:
-                analisi_html = formatta_analisi_html(st.session_state.ai_summaries[link])
-                st.markdown(f"<div style='border-left:3px solid var(--accent); padding:6px 0 6px 18px; margin-top:10px;'><div class='report-sec-h'>ANALISI DEL LEGAL COUNSEL AI</div>{analisi_html}</div>", unsafe_allow_html=True)
+        _card_articolo(art, tipo_bacheca)
 
-            # Banner di rimando ai report del Radar collegati a questa notizia
-            if tipo_bacheca != "bookmarks":
-                collegati = db.report_collegati_a_articolo(art['id'])
-                for rc in collegati:
-                    dt = rc['data_report'].strftime('%d/%m/%Y') if rc.get('data_report') else ''
-                    st.markdown(
-                        f'<div class="report-banner">📨 C\'è un report del Legal Radar su questo tema: '
-                        f'<b>{html.escape(str(rc["titolo"]))}</b>{(" · " + dt) if dt else ""}</div>',
-                        unsafe_allow_html=True
-                    )
-                # Controllo di collegamento riservato agli admin
-                if st.session_state.user.get('role') == 'admin':
-                    with st.expander("🔗 Collega a un report Legal Radar"):
-                        opzioni_rep = db.lista_report_per_collegamento()
-                        if not opzioni_rep:
-                            st.caption("Nessun report disponibile da collegare.")
+
+@st.fragment
+def _card_articolo(art: Dict, tipo_bacheca: str):
+    """Card come FRAGMENT: le azioni (salva/letto/analisi/PDF) rieseguono SOLO
+    questa card, senza ricaricare la pagina ne' perdere la posizione di scroll.
+    Lo stato aggiornato in sessione (letti_sessione/rimossi_sessione) fa da
+    overlay sui dati passati dal loop, che il fragment non puo' rileggere."""
+    if art['id'] in st.session_state.rimossi_sessione:
+        st.caption("Rimosso dai salvati.")
+        return
+    with st.container():
+        e_letto = art.get('letto', False) or art['id'] in st.session_state.letti_sessione
+        classe_card = "radar-card letta" if e_letto else "radar-card"
+        badge_nuovo = "" if e_letto else '<span class="badge-nuovo">Nuovo</span>'
+        # Escape di tutti i testi: evita che contenuti con caratteri HTML (es. < > nel riassunto AI) rompano la card
+        e_area = html.escape(str(art.get('area') or ''))
+        e_fonte = html.escape(str(art.get('fonte') or ''))
+        e_titolo = html.escape(str(art.get('titolo') or ''))
+        e_preview = html.escape(str(art.get('preview') or ''))
+        e_link = html.escape(str(art.get('link') or ''), quote=True)
+        # Badge categoria pastello (Legge/Provvedimento/Sentenza/News)
+        sc = _stile_categoria(art.get('tipo_atto'))
+        badge_cat = f'<span class="cat-badge cat-{sc["cls_badge"]}">{sc["label"]}</span>'
+        # Data dell'atto: la pubblicazione reale se disponibile, altrimenti la scansione
+        data_rif = art.get('data_pubblicazione') or art.get('data_scansione')
+        data_str = data_rif.strftime('%d/%m/%Y') if data_rif else ''
+        tag_data = f'<span class="meta-tag tag-rango">{data_str}</span>' if data_str else ''
+        # Tag tema (dall'AI): se assente, ripiega sull'area manuale
+        tema = art.get('tema') or art.get('area')
+        tag_tema = f'<span class="meta-tag tag-area">{html.escape(str(tema))}</span>' if tema else ''
+        # Badge rilevanza (solo priorità visiva, non nasconde nulla)
+        rilevanza = art.get('rilevanza')
+        if rilevanza == "alta":
+            badge_ril = '<span class="badge-ril badge-ril-alta">Alta</span>'
+        else:
+            badge_ril = ''
+        # Micro-riassunto AI sotto il titolo: dal DB, o da quello appena generato in sessione
+        riassunto = art.get('riassunto_ai') or st.session_state.get('micro_riassunti', {}).get(art['id'])
+        blocco_riassunto = f'<div class="card-microsummary">✦ {html.escape(str(riassunto))}</div>' if riassunto else ''
+        card_html = (
+            f'<div class="{classe_card}">'
+            f'<div>{badge_cat}{badge_ril}<span class="meta-tag tag-fonte">{e_fonte}</span>'
+            f'{tag_tema}{tag_data}</div>'
+            f'<a href="{e_link}" target="_blank" class="card-title">{e_titolo}{badge_nuovo}</a>'
+            f'{blocco_riassunto}'
+            f'<div class="card-preview">{e_preview}</div>'
+            f'</div>'
+        )
+        st.markdown(card_html, unsafe_allow_html=True)
+        link = art['link']
+        # Bottoni azione: pillole compatte e ravvicinate (l'ultima colonna vuota le tiene strette a sinistra)
+        b1, b2, b3, b4, _sp = st.columns([1, 1, 1, 1, 1])
+        with b1:
+            if tipo_bacheca == "bookmarks":
+                if st.button("Rimuovi", key=f"rem_{art['id']}", use_container_width=True):
+                    db.rimuovi_bookmark(st.session_state.user['id'], art['id'])
+                    st.session_state.rimossi_sessione.add(art['id'])
+                    st.rerun(scope="fragment")
+            else:
+                if db.check_bookmark_esiste(st.session_state.user['id'], art['id']):
+                    st.button("Salvato ✓", key=f"saved_{art['id']}", use_container_width=True, disabled=True)
+                else:
+                    if st.button("Salva", key=f"save_{art['id']}", use_container_width=True):
+                        db.aggiungi_bookmark(st.session_state.user['id'], art['id'])
+                        st.rerun(scope="fragment")
+        with b2:
+            if not e_letto:
+                if st.button("Segna letto", key=f"read_{art['id']}", use_container_width=True):
+                    db.segna_letto(st.session_state.user['id'], art['id'])
+                    st.session_state.letti_sessione.add(art['id'])
+                    st.rerun(scope="fragment")
+            else:
+                st.button("Letto ✓", key=f"readd_{art['id']}", use_container_width=True, disabled=True)
+        with b3:
+            # Mostro il bottone Analisi solo se non già generata
+            if link not in st.session_state.ai_summaries:
+                if st.button("✦ Analisi AI", key=f"ai_{art['id']}", use_container_width=True):
+                    with st.spinner("Analisi in corso…"):
+                        st.session_state.ai_summaries[link] = genera_sintesi_groq(link, art['preview'])
+                        if not art.get('riassunto_ai') and art['id'] not in st.session_state.micro_riassunti:
+                            meta = genera_microriassunto_groq(art.get('titolo',''), art.get('preview',''))
+                            if meta['riassunto']:
+                                st.session_state.micro_riassunti[art['id']] = meta['riassunto']
+                                db.aggiorna_riassunto_articolo(art['id'], meta['riassunto'], meta['rilevanza'])
+                        db.segna_letto(st.session_state.user['id'], art['id'])
+                        st.session_state.letti_sessione.add(art['id'])
+                    st.rerun(scope="fragment")
+        with b4:
+            # PDF del singolo articolo: lo preparo al clic (genero l'analisi AI
+            # se manca), poi mostro il download.
+            stato_pdf = st.session_state.setdefault('pdf_singolo_pronti', {})
+            if art['id'] not in stato_pdf:
+                if st.button("⬇ Prepara PDF", key=f"preppdf_{art['id']}", use_container_width=True):
+                    with st.spinner("Preparo il PDF…"):
+                        # Analisi: uso quella in sessione, o la genero ora se manca
+                        analisi = st.session_state.ai_summaries.get(link)
+                        if not analisi:
+                            analisi = genera_sintesi_groq(link, art.get('preview', ''))
+                            st.session_state.ai_summaries[link] = analisi
+                        stato_pdf[art['id']] = pdf_export.pdf_singolo(art, analisi_extra=analisi)
+                    st.rerun(scope="fragment")
+            else:
+                st.download_button("⬇ Scarica PDF", data=stato_pdf[art['id']],
+                                   file_name=f"articolo_{art['id']}.pdf", mime="application/pdf",
+                                   key=f"dlpdf_{art['id']}", use_container_width=True)
+        # Se l'analisi esiste (appena generata o già presente), la mostro sotto la card
+        if link in st.session_state.ai_summaries:
+            analisi_html = formatta_analisi_html(st.session_state.ai_summaries[link])
+            st.markdown(f"<div style='border-left:3px solid var(--accent); padding:6px 0 6px 18px; margin-top:10px;'><div class='report-sec-h'>ANALISI DEL LEGAL COUNSEL AI</div>{analisi_html}</div>", unsafe_allow_html=True)
+
+        # Banner di rimando ai report del Radar collegati a questa notizia
+        if tipo_bacheca != "bookmarks":
+            collegati = db.report_collegati_a_articolo(art['id'])
+            for rc in collegati:
+                dt = rc['data_report'].strftime('%d/%m/%Y') if rc.get('data_report') else ''
+                st.markdown(
+                    f'<div class="report-banner">📨 C\'è un report del Legal Radar su questo tema: '
+                    f'<b>{html.escape(str(rc["titolo"]))}</b>{(" · " + dt) if dt else ""}</div>',
+                    unsafe_allow_html=True
+                )
+            # Controllo di collegamento riservato agli admin
+            if st.session_state.user.get('role') == 'admin':
+                with st.expander("🔗 Collega a un report Legal Radar"):
+                    opzioni_rep = db.lista_report_per_collegamento()
+                    if not opzioni_rep:
+                        st.caption("Nessun report disponibile da collegare.")
+                    else:
+                        id_collegati = {rc['id'] for rc in collegati}
+                        mappa = {f"{r['titolo'][:70]} ({r['data_report'].strftime('%d/%m/%Y') if r.get('data_report') else '—'})": r['id'] for r in opzioni_rep}
+                        scelta = st.selectbox("Report", list(mappa.keys()), key=f"sel_rep_{art['id']}", label_visibility="collapsed")
+                        rid = mappa[scelta]
+                        cc1, cc2 = st.columns(2)
+                        if rid not in id_collegati:
+                            if cc1.button("Collega", key=f"link_{art['id']}_{rid}"):
+                                db.collega_articolo_report(art['id'], rid)
+                                st.rerun(scope="fragment")
                         else:
-                            id_collegati = {rc['id'] for rc in collegati}
-                            mappa = {f"{r['titolo'][:70]} ({r['data_report'].strftime('%d/%m/%Y') if r.get('data_report') else '—'})": r['id'] for r in opzioni_rep}
-                            scelta = st.selectbox("Report", list(mappa.keys()), key=f"sel_rep_{art['id']}", label_visibility="collapsed")
-                            rid = mappa[scelta]
-                            cc1, cc2 = st.columns(2)
-                            if rid not in id_collegati:
-                                if cc1.button("Collega", key=f"link_{art['id']}_{rid}"):
-                                    db.collega_articolo_report(art['id'], rid)
-                                    st.rerun()
-                            else:
-                                if cc1.button("Scollega", key=f"unlink_{art['id']}_{rid}"):
-                                    db.scollega_articolo_report(art['id'], rid)
-                                    st.rerun()
-            st.write("")
+                            if cc1.button("Scollega", key=f"unlink_{art['id']}_{rid}"):
+                                db.scollega_articolo_report(art['id'], rid)
+                                st.rerun(scope="fragment")
+        st.write("")
+
+@st.fragment
+def _pannello_toggle_fonti():
+    """Pannello ON/OFF delle fonti come FRAGMENT: ogni toggle aggiorna solo questo
+    pannello, senza ricaricare la pagina. La query sta dentro il fragment, cosi'
+    ogni riesecuzione legge lo stato fresco dal database."""
+    fonti_personali = db.carica_fonti_con_preferenze(st.session_state.user['id'])
+    for f in fonti_personali:
+        col_info, col_toggle = st.columns([4, 1])
+        # Normalizzo: tutto ciò che non è 'Editoriale' è trattato come 'Ufficiale'
+        tipo_f = "Editoriale" if (f.get('tipo_fonte') or '').lower() == "editoriale" else "Ufficiale"
+        emoji_tipo = "📰" if tipo_f == "Editoriale" else "🏛️"
+        col_info.markdown(
+            f"**{html.escape(str(f['nome']))}** {emoji_tipo} "
+            f"<span style='font-size:12px;color:#888;'>· {tipo_f}</span>",
+            unsafe_allow_html=True
+        )
+        # Interruttore ON/OFF: aggiorna solo il fragment, non la pagina intera
+        is_on = col_toggle.toggle("Attivo", value=f['utente_attiva'], key=f"tog_{f['id']}")
+        if is_on != f['utente_attiva']:
+            db.imposta_preferenza_fonte(st.session_state.user['id'], f['id'], is_on)
+            svuota_cache_fonti()
+            st.rerun(scope="fragment")
+
 
 def _stile_categoria(tipo_atto: Optional[str]) -> Dict[str, str]:
     """Ritorna classi CSS ed etichetta per categoria (badge pastello + thumb dashboard)."""
@@ -2344,26 +2384,9 @@ elif pagina_pulita == "⚙️ Gestione Fonti":
     # MODIFICA: SEZIONE 1 - INTERFACCIA ON/OFF PERSONALE (Punto 1)
     st.subheader("🎛️ Il Tuo Pannello di Controllo Canali (Personale)")
     st.caption("Spegni i canali che non vuoi vedere nel tuo feed. Questa modifica ha effetto solo sul tuo account.")
-    
-    fonti_personali = db.carica_fonti_con_preferenze(st.session_state.user['id'])
-    for f in fonti_personali:
-        col_info, col_toggle = st.columns([4, 1])
-        # Normalizzo: tutto ciò che non è 'Editoriale' è trattato come 'Ufficiale'
-        tipo_f = "Editoriale" if (f.get('tipo_fonte') or '').lower() == "editoriale" else "Ufficiale"
-        emoji_tipo = "📰" if tipo_f == "Editoriale" else "🏛️"
-        col_info.markdown(
-            f"**{html.escape(str(f['nome']))}** {emoji_tipo} "
-            f"<span style='font-size:12px;color:#888;'>· {tipo_f}</span>",
-            unsafe_allow_html=True
-        )
-        
-        # Gestione interruttore ON/OFF in tempo reale
-        is_on = col_toggle.toggle("Attivo", value=f['utente_attiva'], key=f"tog_{f['id']}")
-        if is_on != f['utente_attiva']:
-            db.imposta_preferenza_fonte(st.session_state.user['id'], f['id'], is_on)
-            svuota_cache_fonti()
-            st.rerun()
-            
+
+    _pannello_toggle_fonti()
+
     st.divider()
     
     # SEZIONE 2 - AGGIUNTA GLOBALE (Per tutti)
