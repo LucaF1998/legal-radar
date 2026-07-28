@@ -1339,6 +1339,154 @@ def estrai_testo_completo(url: str) -> str:
         return ""
 
 # --- MODIFICA: POTENZIAMENTO PROMPT AI VERTICALE (Punto 2) ---
+# ============================================================
+# CALCOLATORE SANZIONI GDPR (metodologia EDPB 04/2022 semplificata)
+# Il CALCOLO è deterministico e trasparente (questo modulo);
+# l'AI serve SOLO a interpretare lo scenario descritto (articoli
+# violati, scaglione, gravità) — mai a produrre numeri.
+# ============================================================
+
+# Correzione per dimensione d'impresa (classi di fatturato, LG EDPB 04/2022):
+# la sanzione di partenza viene ridotta per le imprese piccole, perché sia
+# proporzionata. Valori = quota massima dell'importo base applicabile.
+FASCE_FATTURATO_EDPB = [
+    (2_000_000,       0.004),   # fino a 2 mln: importo ridotto fino allo 0,2-0,4%
+    (10_000_000,      0.02),    # 2-10 mln
+    (50_000_000,      0.10),    # 10-50 mln
+    (100_000_000,     0.20),    # 50-100 mln
+    (250_000_000,     0.50),    # 100-250 mln
+    (500_000_000,     0.75),    # 250-500 mln
+    (float("inf"),    1.00),    # oltre 500 mln: nessun abbattimento
+]
+
+# Punto di partenza per gravità (LG EDPB 04/2022): quota del massimale edittale.
+RANGE_GRAVITA = {
+    "bassa": (0.005, 0.10),
+    "media": (0.10, 0.20),
+    "alta":  (0.20, 0.60),   # le LG arrivano al 100%: cap prudenziale al 60% per la stima
+}
+
+
+def motore_stima_sanzione(fatturato: float, scaglione: str, gravita: str,
+                          n_aggravanti: int, n_attenuanti: int) -> Dict:
+    """Stima la forbice sanzionatoria secondo la metodologia EDPB semplificata.
+    Ritorna un dict con: massimale, forbice (min, max), dettagli del calcolo.
+    - scaglione: '2%' (art. 83.4) o '4%' (art. 83.5-6)
+    - gravita: 'bassa' | 'media' | 'alta'
+    """
+    fatturato = max(0.0, float(fatturato or 0))
+    # 1) Massimale edittale: statico vs dinamico, si applica il MAGGIORE
+    if scaglione == "4%":
+        massimale = max(20_000_000.0, fatturato * 0.04)
+    else:
+        massimale = max(10_000_000.0, fatturato * 0.02)
+
+    # 2) Punto di partenza per gravità
+    g_min, g_max = RANGE_GRAVITA.get(gravita, RANGE_GRAVITA["media"])
+    base_min, base_max = massimale * g_min, massimale * g_max
+
+    # 3) Correzione per dimensione d'impresa (fascia di fatturato)
+    fattore_dim = 1.0
+    for soglia, fattore in FASCE_FATTURATO_EDPB:
+        if fatturato <= soglia:
+            fattore_dim = fattore
+            break
+    stima_min, stima_max = base_min * fattore_dim, base_max * fattore_dim
+
+    # 4) Aggravanti / attenuanti (art. 83.2): ogni voce sposta la forbice del 15%
+    fattore_circostanze = 1.0 + 0.15 * n_aggravanti - 0.15 * n_attenuanti
+    fattore_circostanze = max(0.25, min(2.5, fattore_circostanze))
+    stima_min *= fattore_circostanze
+    stima_max *= fattore_circostanze
+
+    # 5) Rispetto dei limiti: mai sopra il massimale, mai sotto una soglia simbolica
+    stima_max = min(stima_max, massimale)
+    stima_min = max(min(stima_min, stima_max * 0.9), 1000.0)
+
+    return {
+        "massimale": massimale,
+        "stima_min": stima_min,
+        "stima_max": stima_max,
+        "fattore_dimensione": fattore_dim,
+        "fattore_circostanze": fattore_circostanze,
+        "range_gravita": (g_min, g_max),
+    }
+
+
+def analizza_scenario_gdpr_groq(descrizione: str, contesto: Dict) -> Dict:
+    """Chiede all'AI di interpretare lo scenario: articoli GDPR potenzialmente
+    violati, scaglione applicabile, gravità suggerita e motivazione.
+    Output JSON con parsing robusto. L'AI NON produce importi."""
+    raw_key = st.secrets.get("GROQ_API_KEY", "").strip()
+    if not raw_key.startswith("gsk_"):
+        return {"errore": "Chiave GROQ_API_KEY non configurata."}
+
+    system_prompt = (
+        "Sei un Senior Legal Counsel italiano esperto di GDPR e provvedimenti del Garante privacy. "
+        "Ricevi la descrizione di uno scenario (trattamento previsto, prassi in essere o data breach) "
+        "e alcuni dati di contesto. Il tuo compito e' SOLO l'inquadramento giuridico, NON quantificare importi.\n\n"
+        "Rispondi ESCLUSIVAMENTE con un oggetto JSON valido, senza testo prima o dopo, con questa struttura:\n"
+        "{\n"
+        '  "violazioni_rilevate": true/false,\n'
+        '  "articoli": [ {"articolo": "art. 32 GDPR", "profilo": "breve spiegazione del profilo di violazione"} ],\n'
+        '  "scaglione": "2%" oppure "4%",\n'
+        '  "gravita": "bassa" | "media" | "alta",\n'
+        '  "motivazione_gravita": "1-2 frasi sul perche\'",\n'
+        '  "osservazioni": "eventuali cautele, profili dubbi, o cosa manca per valutare meglio"\n'
+        "}\n\n"
+        "REGOLE VINCOLANTI:\n"
+        "- Classifica nello scaglione 4% (art. 83.5-6: massimale 20 mln / 4% fatturato) le violazioni di: "
+        "principi base del trattamento (artt. 5, 6, 7, 9), diritti degli interessati (artt. 12-22), "
+        "trasferimenti extra-UE (artt. 44-49), inosservanza di ordini dell'autorita'.\n"
+        "- Classifica nello scaglione 2% (art. 83.4: massimale 10 mln / 2%) le violazioni degli obblighi "
+        "di titolare/responsabile: artt. 8, 11, 25-39 (es. privacy by design 25, sicurezza 32, notifica breach 33-34, "
+        "DPIA 35, DPO 37-39, registri 30), 42, 43.\n"
+        "- Se emergono violazioni di entrambi gli scaglioni, indica '4%' (assorbe il piu' grave).\n"
+        "- NON inventare articoli: cita solo profili chiaramente desumibili dalla descrizione.\n"
+        "- Se la descrizione non evidenzia alcuna violazione plausibile, metti violazioni_rilevate: false "
+        "e spiega nelle osservazioni.\n"
+        "- Gravita': valuta natura, ambito, categorie di dati, numero interessati, durata (art. 83.2 lett. a, b, g)."
+    )
+    user_msg = (
+        f"SCENARIO:\n{descrizione}\n\n"
+        f"CONTESTO:\n"
+        f"- Tipo: {contesto.get('tipo','n/d')}\n"
+        f"- Categorie di dati: {', '.join(contesto.get('categorie_dati', [])) or 'non specificate'}\n"
+        f"- Interessati coinvolti (ordine di grandezza): {contesto.get('n_interessati','n/d')}\n"
+        f"- Durata: {contesto.get('durata','n/d')}\n"
+        f"- Carattere: {contesto.get('carattere','n/d')}"
+    )
+    payload = {
+        "model": "llama-3.3-70b-versatile",
+        "messages": [{"role": "system", "content": system_prompt},
+                     {"role": "user", "content": user_msg}],
+        "temperature": 0.1,
+        "max_tokens": 900,
+        "response_format": {"type": "json_object"},
+    }
+    try:
+        r = requests.post("https://api.groq.com/openai/v1/chat/completions",
+                          headers={"Authorization": f"Bearer {raw_key}", "Content-Type": "application/json"},
+                          json=payload, timeout=30)
+        if r.status_code != 200:
+            return {"errore": f"Errore AI ({r.status_code})"}
+        contenuto = r.json()['choices'][0]['message']['content'].strip()
+        contenuto = contenuto.replace("```json", "").replace("```", "").strip()
+        dati = json.loads(contenuto)
+        # Validazione difensiva dei campi chiave
+        if dati.get("scaglione") not in ("2%", "4%"):
+            dati["scaglione"] = "4%"
+        if dati.get("gravita") not in ("bassa", "media", "alta"):
+            dati["gravita"] = "media"
+        if not isinstance(dati.get("articoli"), list):
+            dati["articoli"] = []
+        return dati
+    except json.JSONDecodeError:
+        return {"errore": "Risposta AI non interpretabile. Riprova."}
+    except Exception:
+        return {"errore": "Connessione AI fallita. Riprova."}
+
+
 def formatta_analisi_html(testo: str) -> str:
     """Trasforma l'analisi AI (testo semplice con titoli in MAIUSCOLO) in HTML
     coerente col design: titoli di sezione in mono uppercase arancione
@@ -1765,6 +1913,7 @@ with st.sidebar:
         "🏛️ Provvedimenti",
         "⚖️ Sentenze",
         "📰 News",
+        "🧮 Calcolatore Sanzioni",
         "🔖 I Miei Salvati",
         "⚙️ Gestione Fonti"
     ]
@@ -2138,7 +2287,7 @@ def _semaforo_fonte(s: Dict) -> Tuple[str, str]:
 pagina_pulita = re.sub(r"\s*\(\d+\)$", "", pagina)
 
 ricerca = ""
-if pagina_pulita not in ["⚙️ Gestione Fonti", "🏠 Dashboard", "🔎 Cerca"]:
+if pagina_pulita not in ["⚙️ Gestione Fonti", "🏠 Dashboard", "🔎 Cerca", "🧮 Calcolatore Sanzioni"]:
     ricerca = st.text_input("🔍 Cerca parole chiave nell'archivio storico...")
 
 # --- ROUTING PAGINE ---
@@ -2385,6 +2534,160 @@ elif pagina_pulita in ["📖 Leggi", "🏛️ Provvedimenti", "⚖️ Sentenze",
             st.rerun()
     elif limite_corrente > PAGINA_DIM:
         st.caption("Hai raggiunto la fine dell'archivio per questi filtri.")
+
+elif pagina_pulita == "🧮 Calcolatore Sanzioni":
+    st.header("Calcolatore Sanzioni GDPR")
+    st.markdown("<div style='font-size:14px; color:var(--ink-soft); margin-bottom:18px;'>Stima orientativa della possibile sanzione del Garante privacy, secondo la metodologia delle Linee Guida EDPB 04/2022 (semplificata). Percorso guidato in 4 passi.</div>", unsafe_allow_html=True)
+
+    if 'calc_step' not in st.session_state: st.session_state.calc_step = 1
+    if 'calc_dati' not in st.session_state: st.session_state.calc_dati = {}
+
+    # Stepper visivo
+    passi = ["Azienda", "Scenario", "Fattori", "Stima"]
+    stepper = "".join(
+        f"<span style='font-family:var(--mono); font-size:11px; font-weight:700; letter-spacing:.06em; text-transform:uppercase; padding:5px 12px; border-radius:999px; margin-right:8px; "
+        + ("background:var(--accent); color:#fff;'" if (i + 1) == st.session_state.calc_step
+           else "background:var(--accent-soft); color:var(--accent-hover);'" if (i + 1) < st.session_state.calc_step
+           else "background:#F2F2F2; color:var(--ink-faint);'")
+        + f">{i+1} · {p}</span>"
+        for i, p in enumerate(passi)
+    )
+    st.markdown(f"<div style='margin-bottom:22px;'>{stepper}</div>", unsafe_allow_html=True)
+    d = st.session_state.calc_dati
+
+    # ---------- STEP 1: AZIENDA ----------
+    if st.session_state.calc_step == 1:
+        st.subheader("L'azienda")
+        st.markdown("<div style='font-size:13.5px; color:var(--ink-soft); margin-bottom:10px;'>Il fatturato determina sia il massimale edittale (2% o 4% del fatturato mondiale annuo, se superiore ai massimali fissi) sia la proporzionalità della sanzione: a parità di violazione, un'impresa piccola riceve importi molto più contenuti.</div>", unsafe_allow_html=True)
+        fatturato = st.number_input("Fatturato annuo mondiale del gruppo (€)", min_value=0, value=int(d.get('fatturato', 0)), step=100_000, format="%d",
+                                    help="Il fatturato consolidato mondiale dell'esercizio precedente. Per i gruppi conta il fatturato del gruppo, non della singola società.")
+        settore = st.text_input("Settore di attività (facoltativo)", value=d.get('settore', ''), placeholder="es. comparazione assicurativa online")
+        if st.button("Avanti →", type="primary", key="c1avanti"):
+            if fatturato <= 0:
+                st.error("Inserisci un fatturato maggiore di zero: è la base del calcolo.")
+            else:
+                d['fatturato'] = fatturato
+                d['settore'] = settore
+                st.session_state.calc_step = 2
+                st.rerun()
+
+    # ---------- STEP 2: SCENARIO ----------
+    elif st.session_state.calc_step == 2:
+        st.subheader("Lo scenario da valutare")
+        tipo = st.radio("Di cosa si tratta?",
+                        ["Progetto / iniziativa futura", "Prassi già in essere", "Data breach / incidente avvenuto"],
+                        index=["Progetto / iniziativa futura", "Prassi già in essere", "Data breach / incidente avvenuto"].index(d.get('tipo', "Progetto / iniziativa futura")),
+                        horizontal=True)
+        descrizione = st.text_area("Descrivi lo scenario in linguaggio semplice",
+                                   value=d.get('descrizione', ''), height=170,
+                                   placeholder="Es.: il marketing vorrebbe inviare email promozionali ai clienti che hanno chiesto solo un preventivo, senza un consenso specifico per il marketing. Oppure: abbiamo scoperto che un fornitore ha esposto per errore un database con nomi, email e codici fiscali di 30.000 clienti…")
+        st.caption("Più dettagli dai (che dati, di chi, per farci cosa, con quali garanzie), più l'inquadramento sarà preciso.")
+        cB, cA = st.columns([1, 1])
+        if cB.button("← Indietro", key="c2indietro"):
+            st.session_state.calc_step = 1
+            st.rerun()
+        if cA.button("Avanti →", type="primary", key="c2avanti"):
+            if len(descrizione.strip()) < 30:
+                st.error("La descrizione è troppo breve per un inquadramento sensato: aggiungi qualche dettaglio.")
+            else:
+                d['tipo'] = tipo
+                d['descrizione'] = descrizione.strip()
+                st.session_state.calc_step = 3
+                st.rerun()
+
+    # ---------- STEP 3: FATTORI ----------
+    elif st.session_state.calc_step == 3:
+        st.subheader("I fattori che pesano (art. 83.2 GDPR)")
+        categorie = st.multiselect("Categorie di dati coinvolte",
+                                   ["Dati comuni (anagrafiche, contatti)", "Dati particolari (salute, ecc. - art. 9)",
+                                    "Dati giudiziari (art. 10)", "Dati di minori", "Dati finanziari/bancari"],
+                                   default=d.get('categorie_dati', ["Dati comuni (anagrafiche, contatti)"]))
+        n_int = st.select_slider("Interessati coinvolti (ordine di grandezza)",
+                                 options=["< 100", "100 - 1.000", "1.000 - 10.000", "10.000 - 100.000", "> 100.000"],
+                                 value=d.get('n_interessati', "1.000 - 10.000"))
+        durata = st.radio("Durata della condotta", ["Episodio singolo", "Limitata (giorni/settimane)", "Prolungata (mesi/anni)"],
+                          index=["Episodio singolo", "Limitata (giorni/settimane)", "Prolungata (mesi/anni)"].index(d.get('durata', "Episodio singolo")), horizontal=True)
+        carattere = st.radio("Carattere della condotta", ["Colposo (negligenza/errore)", "Doloso (consapevole)", "Non so"],
+                             index=["Colposo (negligenza/errore)", "Doloso (consapevole)", "Non so"].index(d.get('carattere', "Colposo (negligenza/errore)")), horizontal=True)
+        st.markdown("<div class='report-sec-h' style='margin-top:16px;'>ATTENUANTI PRESENTI</div>", unsafe_allow_html=True)
+        att_opts = ["Misure tecniche/organizzative adeguate già in atto", "DPO nominato e coinvolto",
+                    "Notifica spontanea al Garante", "Piena cooperazione con l'autorità",
+                    "Nessuna violazione precedente", "Danno mitigato tempestivamente"]
+        attenuanti = [o for o in att_opts if st.checkbox(o, value=o in d.get('attenuanti', []), key=f"att_{o[:18]}")]
+        st.markdown("<div class='report-sec-h' style='margin-top:16px;'>AGGRAVANTI PRESENTI</div>", unsafe_allow_html=True)
+        agg_opts = ["Precedenti sanzioni o ammonimenti del Garante", "Beneficio economico ottenuto dalla condotta",
+                    "Scarsa cooperazione con l'autorità", "Condotta proseguita nonostante segnalazioni interne"]
+        aggravanti = [o for o in agg_opts if st.checkbox(o, value=o in d.get('aggravanti', []), key=f"agg_{o[:18]}")]
+        cB, cA = st.columns([1, 1])
+        if cB.button("← Indietro", key="c3indietro"):
+            st.session_state.calc_step = 2
+            st.rerun()
+        if cA.button("Calcola la stima →", type="primary", key="c3avanti"):
+            d['categorie_dati'] = categorie
+            d['n_interessati'] = n_int
+            d['durata'] = durata
+            d['carattere'] = carattere
+            d['attenuanti'] = attenuanti
+            d['aggravanti'] = aggravanti
+            st.session_state.pop('calc_risultato', None)  # nuova valutazione
+            st.session_state.calc_step = 4
+            st.rerun()
+
+    # ---------- STEP 4: RISULTATO ----------
+    elif st.session_state.calc_step == 4:
+        if 'calc_risultato' not in st.session_state:
+            with st.spinner("Il Legal Counsel AI sta inquadrando lo scenario…"):
+                esito_ai = analizza_scenario_gdpr_groq(d.get('descrizione', ''), d)
+            st.session_state.calc_risultato = esito_ai
+        esito = st.session_state.calc_risultato
+
+        if esito.get("errore"):
+            st.error(f"Inquadramento AI non riuscito: {esito['errore']}")
+            if st.button("Riprova", key="c4riprova"):
+                st.session_state.pop('calc_risultato', None)
+                st.rerun()
+        elif not esito.get("violazioni_rilevate", False):
+            st.success("Dalla descrizione fornita non emergono profili di violazione GDPR evidenti.")
+            if esito.get("osservazioni"):
+                st.markdown(f"<div style='border-left:3px solid var(--accent); padding:6px 0 6px 18px; margin-top:8px; font-size:14px; color:var(--ink-soft);'>{html.escape(str(esito['osservazioni']))}</div>", unsafe_allow_html=True)
+            st.caption("Nota: l'assenza di profili evidenti in questa stima NON equivale a un via libera legale.")
+        else:
+            # Il carattere doloso conta come aggravante aggiuntiva (art. 83.2 lett. b)
+            n_agg = len(d.get('aggravanti', [])) + (1 if d.get('carattere', '').startswith('Doloso') else 0)
+            n_att = len(d.get('attenuanti', []))
+            stima = motore_stima_sanzione(d['fatturato'], esito['scaglione'], esito['gravita'], n_agg, n_att)
+
+            def eur(x):
+                return f"{x:,.0f} €".replace(",", ".")
+
+            st.markdown(f"""<div style='background:var(--surface); border:1px solid var(--hair); border-radius:16px; padding:26px 30px; margin-bottom:16px;'>
+<div class='report-sec-h'>FORBICE DI STIMA</div>
+<div style='font-family:var(--display); font-weight:700; font-size:40px; color:var(--ink); margin:6px 0 2px;'>{eur(stima['stima_min'])} — {eur(stima['stima_max'])}</div>
+<div style='font-family:var(--mono); font-size:12px; color:var(--ink-faint);'>massimale edittale: {eur(stima['massimale'])} · scaglione {html.escape(esito['scaglione'])} · gravità {html.escape(esito['gravita'])}</div>
+</div>""", unsafe_allow_html=True)
+
+            st.markdown("<div class='report-sec-h'>PROFILI DI VIOLAZIONE INDIVIDUATI</div>", unsafe_allow_html=True)
+            for a in esito.get('articoli', [])[:8]:
+                st.markdown(f"<div style='font-size:14px; line-height:1.6; color:var(--ink-soft); margin:4px 0;'><b style='color:var(--ink);'>{html.escape(str(a.get('articolo','')))}</b> — {html.escape(str(a.get('profilo','')))}</div>", unsafe_allow_html=True)
+            if esito.get('motivazione_gravita'):
+                st.markdown(f"<div class='report-sec-h' style='margin-top:14px;'>GRAVITÀ: {html.escape(esito['gravita'].upper())}</div><div style='font-size:14px; color:var(--ink-soft);'>{html.escape(str(esito['motivazione_gravita']))}</div>", unsafe_allow_html=True)
+            if esito.get('osservazioni'):
+                st.markdown(f"<div class='report-sec-h' style='margin-top:14px;'>OSSERVAZIONI</div><div style='font-size:14px; color:var(--ink-soft);'>{html.escape(str(esito['osservazioni']))}</div>", unsafe_allow_html=True)
+
+            fattori_txt = f"{n_att} attenuanti e {n_agg} aggravanti considerate"
+            st.markdown(f"<div style='font-family:var(--mono); font-size:12px; color:var(--ink-faint); margin-top:14px;'>{fattori_txt} · correzione dimensione impresa applicata</div>", unsafe_allow_html=True)
+
+        st.markdown("<div style='background:var(--accent-soft); border-radius:10px; padding:13px 16px; margin-top:18px; font-size:13px; line-height:1.55; color:var(--accent-hover);'><b>Avvertenza.</b> Stima orientativa a uso interno, basata su una semplificazione della metodologia EDPB 04/2022. Non costituisce parere legale né previsione: il Garante dispone di ampia discrezionalità e il caso concreto può differire in modo sostanziale. Per decisioni operative, coinvolgere il team legale.</div>", unsafe_allow_html=True)
+
+        cB, cN = st.columns([1, 1])
+        if cB.button("← Modifica i fattori", key="c4indietro"):
+            st.session_state.calc_step = 3
+            st.rerun()
+        if cN.button("Nuova simulazione", type="primary", key="c4nuova"):
+            st.session_state.calc_step = 1
+            st.session_state.calc_dati = {}
+            st.session_state.pop('calc_risultato', None)
+            st.rerun()
 
 elif pagina_pulita == "🔖 I Miei Salvati":
     st.header("I Miei Salvati")
