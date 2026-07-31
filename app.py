@@ -611,6 +611,35 @@ class LegalRadarDB:
             cur.execute(query, (tipo_atto, user_id))
             return [r[0] for r in cur.fetchall()]
 
+    def cerca_precedenti_garante(self, parole_chiave: List[str], limite: int = 4) -> List[Dict]:
+        """Cerca nell'archivio i provvedimenti (in senso lato: atti non-news) che
+        toccano il tipo di trattamento descritto, a partire dalle parole chiave
+        estratte dallo scenario. Serve al Calcolatore Sanzioni per mostrare i
+        PRECEDENTI REALI correlati: documenti veri dell'archivio, con link,
+        contro il rischio di 'precedenti' inventati dall'AI."""
+        parole = [p.strip() for p in (parole_chiave or []) if p and len(p.strip()) >= 3][:5]
+        if not parole:
+            return []
+        condizioni, params = [], []
+        for p in parole:
+            like = f"%{p}%"
+            condizioni.append("(a.titolo ILIKE %s OR a.preview ILIKE %s OR a.riassunto_ai ILIKE %s)")
+            params.extend([like, like, like])
+        query = f"""
+            SELECT a.id, a.titolo, a.link, a.fonte, a.tema,
+                   COALESCE(a.data_pubblicazione, a.data_scansione::date) AS data_rif
+            FROM articles a
+            LEFT JOIN sources src ON src.nome = a.fonte
+            WHERE LOWER(COALESCE(src.tipo_fonte,'')) <> 'editoriale'
+              AND ({" OR ".join(condizioni)})
+            ORDER BY data_rif DESC NULLS LAST
+            LIMIT %s
+        """
+        params.append(limite)
+        with self.get_cursor(dict_cursor=True) as cur:
+            cur.execute(query, params)
+            return [dict(r) for r in cur.fetchall()]
+
     def ricerca_globale(self, user_id: int, testo: str, limite: int = 40) -> Dict[str, List[Dict]]:
         """Cerca lo stesso testo su articoli e report del Radar. Ritorna due liste separate.
         Rispetta le fonti spente dall'utente per gli articoli."""
@@ -1380,11 +1409,16 @@ RANGE_GRAVITA = {
 
 
 def motore_stima_sanzione(fatturato: float, scaglione: str, gravita: str,
-                          n_aggravanti: int, n_attenuanti: int) -> Dict:
+                          n_aggravanti: int, n_attenuanti: int,
+                          prassi: str = "non_nota") -> Dict:
     """Stima la forbice sanzionatoria secondo la metodologia EDPB semplificata.
     Ritorna un dict con: massimale, forbice (min, max), dettagli del calcolo.
     - scaglione: '2%' (art. 83.4) o '4%' (art. 83.5-6)
     - gravita: 'bassa' | 'media' | 'alta'
+    - prassi: prassi sanzionatoria del Garante sul TIPO di trattamento
+      ('consolidata' +20%, 'episodica' +10%, 'non_nota' invariato).
+      NB: e' cosa diversa dalla recidiva propria dell'azienda, che rientra
+      nelle aggravanti (art. 83.2 lett. e).
     """
     fatturato = max(0.0, float(fatturato or 0))
     # 1) Massimale edittale: statico vs dinamico, si applica il MAGGIORE
@@ -1411,6 +1445,12 @@ def motore_stima_sanzione(fatturato: float, scaglione: str, gravita: str,
     stima_min *= fattore_circostanze
     stima_max *= fattore_circostanze
 
+    # 4-bis) Prassi sanzionatoria del Garante sul tipo di trattamento:
+    # un filone attivo rende il rischio piu' concreto -> forbice verso l'alto.
+    fattore_prassi = {"consolidata": 1.20, "episodica": 1.10}.get(prassi, 1.0)
+    stima_min *= fattore_prassi
+    stima_max *= fattore_prassi
+
     # 5) Rispetto dei limiti: mai sopra il massimale, mai sotto una soglia simbolica
     stima_max = min(stima_max, massimale)
     stima_min = max(min(stima_min, stima_max * 0.9), 1000.0)
@@ -1421,6 +1461,7 @@ def motore_stima_sanzione(fatturato: float, scaglione: str, gravita: str,
         "stima_max": stima_max,
         "fattore_dimensione": fattore_dim,
         "fattore_circostanze": fattore_circostanze,
+        "fattore_prassi": fattore_prassi,
         "range_gravita": (g_min, g_max),
     }
 
@@ -1444,6 +1485,9 @@ def analizza_scenario_gdpr_groq(descrizione: str, contesto: Dict) -> Dict:
         '  "scaglione": "2%" oppure "4%",\n'
         '  "gravita": "bassa" | "media" | "alta",\n'
         '  "motivazione_gravita": "1-2 frasi sul perche\'",\n'
+        '  "prassi_sanzionatoria": "consolidata" | "episodica" | "non_nota",\n'
+        '  "descrizione_prassi": "1-2 frasi che caratterizzano l\'attivita\' sanzionatoria del Garante su questo TIPO di trattamento",\n'
+        '  "parole_chiave": ["3-5 parole chiave in italiano per cercare provvedimenti simili in archivio"],\n'
         '  "osservazioni": "eventuali cautele, profili dubbi, o cosa manca per valutare meglio"\n'
         "}\n\n"
         "REGOLE VINCOLANTI:\n"
@@ -1457,7 +1501,15 @@ def analizza_scenario_gdpr_groq(descrizione: str, contesto: Dict) -> Dict:
         "- NON inventare articoli: cita solo profili chiaramente desumibili dalla descrizione.\n"
         "- Se la descrizione non evidenzia alcuna violazione plausibile, metti violazioni_rilevate: false "
         "e spiega nelle osservazioni.\n"
-        "- Gravita': valuta natura, ambito, categorie di dati, numero interessati, durata (art. 83.2 lett. a, b, g)."
+        "- Gravita': valuta natura, ambito, categorie di dati, numero interessati, durata (art. 83.2 lett. a, b, g).\n"
+        "- Prassi sanzionatoria: indica 'consolidata' SOLO se il tipo di trattamento descritto appartiene a un filone "
+        "storicamente e notoriamente perseguito dal Garante italiano (es. telemarketing indesiderato, controllo dei "
+        "lavoratori, violazioni su dati sanitari, cookie e tracciamento senza consenso); 'episodica' se risultano "
+        "interventi occasionali; 'non_nota' negli altri casi. Nella descrizione della prassi caratterizza il filone "
+        "in termini generali: NON citare estremi, date, numeri o importi di provvedimenti specifici, che potrebbero "
+        "essere imprecisi. La verifica sui provvedimenti reali avviene altrove.\n"
+        "- Parole chiave: scegli 3-5 termini concreti e specifici del trattamento (es. 'telemarketing', 'geolocalizzazione', "
+        "'newsletter', 'videosorveglianza'), utili per una ricerca testuale in un archivio di provvedimenti."
     )
     user_msg = (
         f"SCENARIO:\n{descrizione}\n\n"
@@ -1492,6 +1544,10 @@ def analizza_scenario_gdpr_groq(descrizione: str, contesto: Dict) -> Dict:
             dati["gravita"] = "media"
         if not isinstance(dati.get("articoli"), list):
             dati["articoli"] = []
+        if dati.get("prassi_sanzionatoria") not in ("consolidata", "episodica", "non_nota"):
+            dati["prassi_sanzionatoria"] = "non_nota"
+        if not isinstance(dati.get("parole_chiave"), list):
+            dati["parole_chiave"] = []
         return dati
     except json.JSONDecodeError:
         return {"errore": "Risposta AI non interpretabile. Riprova."}
@@ -2667,7 +2723,8 @@ elif pagina_pulita == "🧮 Calcolatore Sanzioni":
             # Il carattere doloso conta come aggravante aggiuntiva (art. 83.2 lett. b)
             n_agg = len(d.get('aggravanti', [])) + (1 if d.get('carattere', '').startswith('Doloso') else 0)
             n_att = len(d.get('attenuanti', []))
-            stima = motore_stima_sanzione(d['fatturato'], esito['scaglione'], esito['gravita'], n_agg, n_att)
+            stima = motore_stima_sanzione(d['fatturato'], esito['scaglione'], esito['gravita'], n_agg, n_att,
+                                          prassi=esito.get('prassi_sanzionatoria', 'non_nota'))
 
             def eur(x):
                 return f"{x:,.0f} €".replace(",", ".")
@@ -2683,10 +2740,37 @@ elif pagina_pulita == "🧮 Calcolatore Sanzioni":
                 st.markdown(f"<div style='font-size:14px; line-height:1.6; color:var(--ink-soft); margin:4px 0;'><b style='color:var(--ink);'>{html.escape(str(a.get('articolo','')))}</b> — {html.escape(str(a.get('profilo','')))}</div>", unsafe_allow_html=True)
             if esito.get('motivazione_gravita'):
                 st.markdown(f"<div class='report-sec-h' style='margin-top:14px;'>GRAVITÀ: {html.escape(esito['gravita'].upper())}</div><div style='font-size:14px; color:var(--ink-soft);'>{html.escape(str(esito['motivazione_gravita']))}</div>", unsafe_allow_html=True)
+
+            # --- PRASSI DEL GARANTE sul tipo di trattamento ---
+            prassi = esito.get('prassi_sanzionatoria', 'non_nota')
+            etichette_prassi = {
+                "consolidata": ("FILONE SANZIONATORIO CONSOLIDATO", "var(--alta)", "var(--alta-soft)"),
+                "episodica": ("INTERVENTI EPISODICI", "var(--accent-hover)", "var(--accent-soft)"),
+                "non_nota": ("PRASSI NON NOTA SU QUESTO TRATTAMENTO", "var(--ink-soft)", "#F2F2F2"),
+            }
+            et_txt, et_fg, et_bg = etichette_prassi[prassi]
+            st.markdown(f"<div class='report-sec-h' style='margin-top:14px;'>PRASSI DEL GARANTE</div><div style='margin:4px 0 6px;'><span style='display:inline-block; font-size:11px; font-weight:700; padding:3px 10px; border-radius:999px; background:{et_bg}; color:{et_fg};'>{et_txt}</span></div>", unsafe_allow_html=True)
+            if esito.get('descrizione_prassi'):
+                st.markdown(f"<div style='font-size:14px; line-height:1.6; color:var(--ink-soft);'>{html.escape(str(esito['descrizione_prassi']))}</div>", unsafe_allow_html=True)
+
+            # Precedenti REALI correlati, pescati dall'archivio del Radar
+            precedenti = db.cerca_precedenti_garante(esito.get('parole_chiave', []))
+            if precedenti:
+                st.markdown("<div class='report-sec-h' style='margin-top:14px;'>PRECEDENTI CORRELATI NELL'ARCHIVIO DEL RADAR</div>", unsafe_allow_html=True)
+                for pr in precedenti:
+                    dt = pr['data_rif'].strftime('%d/%m/%Y') if pr.get('data_rif') else ''
+                    meta = " · ".join(x for x in [html.escape(str(pr.get('fonte') or '')), dt] if x)
+                    st.markdown(f"<div style='font-size:14px; line-height:1.55; margin:5px 0;'><a href='{html.escape(str(pr['link']))}' target='_blank' style='color:var(--ink); font-weight:500; text-decoration:none;'>{html.escape(str(pr['titolo']))}</a><span style='font-family:var(--mono); font-size:11px; color:var(--ink-faint);'> — {meta}</span></div>", unsafe_allow_html=True)
+                st.caption("Atti realmente presenti nell'archivio del Radar, correlati per parole chiave: il confronto con casi concreti è il miglior riscontro della stima.")
+            elif esito.get('parole_chiave'):
+                st.caption("Nessun atto correlato trovato nell'archivio del Radar per questo tipo di trattamento.")
+
             if esito.get('osservazioni'):
                 st.markdown(f"<div class='report-sec-h' style='margin-top:14px;'>OSSERVAZIONI</div><div style='font-size:14px; color:var(--ink-soft);'>{html.escape(str(esito['osservazioni']))}</div>", unsafe_allow_html=True)
 
             fattori_txt = f"{n_att} attenuanti e {n_agg} aggravanti considerate"
+            if stima.get('fattore_prassi', 1.0) > 1.0:
+                fattori_txt += f" · fattore prassi +{int((stima['fattore_prassi']-1)*100)}% applicato"
             st.markdown(f"<div style='font-family:var(--mono); font-size:12px; color:var(--ink-faint); margin-top:14px;'>{fattori_txt} · correzione dimensione impresa applicata</div>", unsafe_allow_html=True)
 
         st.markdown("<div style='background:var(--accent-soft); border-radius:10px; padding:13px 16px; margin-top:18px; font-size:13px; line-height:1.55; color:var(--accent-hover);'><b>Avvertenza.</b> Stima orientativa a uso interno, basata su una semplificazione della metodologia EDPB 04/2022. Non costituisce parere legale né previsione: il Garante dispone di ampia discrezionalità e il caso concreto può differire in modo sostanziale. Per decisioni operative, coinvolgere il team legale.</div>", unsafe_allow_html=True)
