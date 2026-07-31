@@ -67,16 +67,28 @@ class LegalRadarDB:
         self.db_url = db_url
 
     def _apri_connessione(self):
-        """Apre una connessione nuova. keepalives: aiuta a tenere viva la connessione
-        ed evitare che firewall/Neon la chiudano silenziosamente."""
-        return psycopg2.connect(
-            self.db_url,
-            connect_timeout=10,
-            keepalives=1,
-            keepalives_idle=30,
-            keepalives_interval=10,
-            keepalives_count=5,
-        )
+        """Apre una connessione nuova, con PAZIENZA per il cold start di Neon:
+        il database serverless in pausa può impiegare 10-15s a risvegliarsi, quindi
+        timeout generoso (20s) e UN tentativo di riprova automatico se il primo
+        fallisce — così il risveglio si traduce in un caricamento più lento,
+        non in un errore rosso per l'utente.
+        keepalives: aiuta a tenere viva la connessione ed evitare chiusure silenziose."""
+        ultimo_errore = None
+        for tentativo in range(2):  # primo tentativo + una riprova
+            try:
+                return psycopg2.connect(
+                    self.db_url,
+                    connect_timeout=20,
+                    keepalives=1,
+                    keepalives_idle=30,
+                    keepalives_interval=10,
+                    keepalives_count=5,
+                )
+            except psycopg2.OperationalError as e:
+                ultimo_errore = e
+                if tentativo == 0:
+                    time.sleep(2)  # respiro per lasciare a Neon il tempo di svegliarsi
+        raise ultimo_errore
 
     def _connessione_valida(self):
         """Restituisce la connessione condivisa, RIAPRENDOLA se assente o chiusa/stantia.
@@ -285,7 +297,7 @@ class LegalRadarDB:
                     cur.execute(command)
         except Exception as e:
             logging.error("Errore critico di connessione al database: %s", e)
-            st.error(f"Errore critico di connessione al database: {e}")
+            st.error("⏳ Il database non risponde in questo momento (probabile risveglio in corso). Attendi qualche secondo e ricarica la pagina. Se il problema persiste per più di un minuto, controlla lo stato di Neon.")
 
     def registra_utente(self, username: str, password: str) -> bool:
         hashed = bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
