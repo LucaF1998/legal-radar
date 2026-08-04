@@ -12,6 +12,13 @@ import feedparser
 import requests
 from bs4 import BeautifulSoup
 
+# ============================================================
+# MODELLO DI INFERENZA (Groq)
+# llama-3.3-70b-versatile dismesso il 16/08/2026 -> openai/gpt-oss-120b.
+# Alternativa: qwen/qwen3.6-27b. Cambiare solo questa riga.
+# Tenere allineato con MODELLO_GROQ in app.py.
+MODELLO_GROQ = "openai/gpt-oss-120b"
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
@@ -146,14 +153,19 @@ def genera_microriassunto(titolo: str, preview: str, e_ufficiale: bool = True,
     )
     contenuto_utente = f"Anteprima: {preview}" if serve_titolo else f"Titolo: {titolo}\n\nAnteprima: {preview}"
     payload = {
-        "model": "llama-3.3-70b-versatile",
+        "model": MODELLO_GROQ,
         "messages": [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": contenuto_utente}
         ],
         "temperature": 0.1,
+        "max_tokens": 800,
         "response_format": {"type": "json_object"}
     }
+    if MODELLO_GROQ.startswith("openai/gpt-oss"):
+        # Modelli di ragionamento: sforzo basso, il compito e' una classificazione
+        # secca e i token di ragionamento consumerebbero il budget della risposta.
+        payload["reasoning_effort"] = "low"
     try:
         r = requests.post(api_url, headers=headers, json=payload, timeout=15)
         if r.status_code != 200:
