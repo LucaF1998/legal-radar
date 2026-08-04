@@ -1348,6 +1348,83 @@ def _payload_groq(messages: List[Dict], temperature: float,
     return payload
 
 
+API_GROQ = "https://api.groq.com/openai/v1/chat/completions"
+
+# Tetti del piano gratuito per openai/gpt-oss-120b (giugno 2026):
+# 30 richieste/min · 1.000 richieste/giorno · 8.000 token/min · 200.000 token/giorno.
+# Il tetto AL MINUTO e' il vincolo stringente: una singola analisi lunga puo'
+# consumarlo tutto, percio' input e max_tokens sono tarati per rientrarvi.
+# Il piano Developer (gratuito, richiede solo una carta) decuplica questi limiti.
+
+
+def _chiama_groq(payload: Dict, chiave: str, timeout: int = 30,
+                 riprova: bool = True) -> Tuple[bool, str]:
+    """Esegue la chiamata a Groq gestendo il superamento di quota (429).
+
+    Quando rifiuta per quota, Groq indica nel corpo QUALE limite e' stato superato
+    (richieste o token, al minuto o al giorno), quanto e' stato consumato e fra
+    quanto riprovare. E' l'informazione piu' utile da mostrare: la estraiamo
+    invece di riportare il solo codice di stato.
+
+    Se l'attesa indicata e' breve (tetto al minuto) riprova una volta da se';
+    se il tetto e' giornaliero non ha senso attendere e restituisce subito
+    il messaggio, cosi' l'utente sa che deve aspettare il rinnovo o alzare il piano.
+
+    Ritorna (riuscito, contenuto_oppure_messaggio_per_l_utente).
+    """
+    intestazioni = {"Authorization": f"Bearer {chiave}", "Content-Type": "application/json"}
+    try:
+        r = requests.post(API_GROQ, headers=intestazioni, json=payload, timeout=timeout)
+    except Exception:
+        return False, "Connessione al servizio AI non riuscita. Riprova."
+
+    if r.status_code == 200:
+        try:
+            return True, r.json()['choices'][0]['message']['content'].strip()
+        except Exception:
+            return False, "Risposta AI non interpretabile."
+
+    if r.status_code == 429:
+        # Estraggo il messaggio di Groq: dice quale limite e quanto attendere
+        dettaglio = ""
+        try:
+            dettaglio = (r.json().get("error", {}) or {}).get("message", "") or ""
+        except Exception:
+            dettaglio = ""
+        attesa = r.headers.get("retry-after")
+        try:
+            attesa_sec = int(float(attesa)) if attesa else None
+        except (TypeError, ValueError):
+            attesa_sec = None
+        giornaliero = "per day" in dettaglio.lower() or "tpd" in dettaglio.lower()
+
+        # Tetto al minuto e attesa breve: riprovo una volta, in silenzio
+        if riprova and not giornaliero and attesa_sec is not None and attesa_sec <= 25:
+            time.sleep(attesa_sec + 1)
+            return _chiama_groq(payload, chiave, timeout=timeout, riprova=False)
+
+        if giornaliero:
+            return False, ("Quota AI giornaliera esaurita. Si rinnova entro le 24 ore. "
+                           "Per alzare i limiti: piano Developer su Groq (gratuito, "
+                           "richiede solo una carta). " + _sintesi_quota(dettaglio))
+        if attesa_sec:
+            return False, (f"Limite di richieste AI raggiunto: riprova fra circa "
+                           f"{attesa_sec} secondi. " + _sintesi_quota(dettaglio))
+        return False, ("Limite di richieste AI raggiunto: attendi qualche istante e riprova. "
+                       + _sintesi_quota(dettaglio))
+
+    return False, f"Servizio AI non disponibile (codice {r.status_code})."
+
+
+def _sintesi_quota(messaggio: str) -> str:
+    """Estrae dal messaggio di Groq la parte con i numeri di consumo, se presente,
+    per darla all'utente senza riversare tutto il testo tecnico."""
+    if not messaggio:
+        return ""
+    m = re.search(r"(Limit\s+[\d,\.]+.*?Used\s+[\d,\.]+)", messaggio, re.IGNORECASE)
+    return f"({m.group(1)})" if m else ""
+
+
 def estrai_testo_pulito(url: str) -> str:
     if url.lower().endswith(('.pdf', '.zip', '.doc')): return ""
     try:
@@ -1355,7 +1432,9 @@ def estrai_testo_pulito(url: str) -> str:
         res = requests.get(url, headers=headers, timeout=6)
         soup = BeautifulSoup(res.text, 'html.parser')
         paragraphs = soup.find_all(['p', 'div'])
-        return " ".join([p.get_text(strip=True) for p in paragraphs if len(p.get_text(strip=True)) > 45])[:12000]
+        # 8.000 caratteri (~2.000 token): tarato sul tetto di 8.000 token/min del
+        # piano gratuito, per non esaurire il budget con una sola analisi.
+        return " ".join([p.get_text(strip=True) for p in paragraphs if len(p.get_text(strip=True)) > 45])[:8000]
     except: return ""
 
 def estrai_testo_completo(url: str) -> str:
@@ -1588,12 +1667,9 @@ def analizza_scenario_gdpr_groq(descrizione: str, contesto: Dict) -> Dict:
          {"role": "user", "content": user_msg}],
         temperature=0.1, max_tokens=1500, json_mode=True)
     try:
-        r = requests.post("https://api.groq.com/openai/v1/chat/completions",
-                          headers={"Authorization": f"Bearer {raw_key}", "Content-Type": "application/json"},
-                          json=payload, timeout=30)
-        if r.status_code != 200:
-            return {"errore": f"Errore AI ({r.status_code})"}
-        contenuto = r.json()['choices'][0]['message']['content'].strip()
+        riuscito, contenuto = _chiama_groq(payload, raw_key, timeout=30)
+        if not riuscito:
+            return {"errore": contenuto}
         contenuto = contenuto.replace("```json", "").replace("```", "").strip()
         dati = json.loads(contenuto)
         # Validazione difensiva dei campi chiave
@@ -1689,12 +1765,9 @@ def genera_sintesi_groq(url: str, preview_text: str) -> str:
     payload = _payload_groq(
         [{"role": "system", "content": system_prompt},
          {"role": "user", "content": f"Testo da analizzare:\n\n{input_ai}"}],
-        temperature=0.2, max_tokens=3200)
-    try:
-        r = requests.post(api_url, headers=headers, json=payload, timeout=30)
-        if r.status_code == 200: return r.json()['choices'][0]['message']['content'].strip()
-        return f"⚠️ Errore AI ({r.status_code})"
-    except: return "⚠️ Connessione AI fallita."
+        temperature=0.2, max_tokens=2500)
+    riuscito, esito = _chiama_groq(payload, raw_key, timeout=40)
+    return esito if riuscito else f"⚠️ {esito}"
 
 def genera_microriassunto_groq(titolo: str, preview: str, e_ufficiale: bool = True,
                                serve_titolo: bool = False) -> Dict[str, Optional[str]]:
@@ -1761,11 +1834,11 @@ def genera_microriassunto_groq(titolo: str, preview: str, e_ufficiale: bool = Tr
          {"role": "user", "content": testo}],
         temperature=0.1, max_tokens=800, json_mode=True)
     try:
-        r = requests.post(api_url, headers=headers, json=payload, timeout=15)
-        if r.status_code != 200:
-            logging.error("Microriassunto: errore AI %s", r.status_code)
+        riuscito, contenuto = _chiama_groq(payload, raw_key, timeout=20)
+        if not riuscito:
+            logging.error("Microriassunto non generato: %s", contenuto)
             return vuoto
-        dati = json.loads(r.json()['choices'][0]['message']['content'].strip())
+        dati = json.loads(contenuto.replace("```json", "").replace("```", "").strip())
         riassunto = (dati.get("riassunto") or "").strip()[:600] or None
         rilevanza = (dati.get("rilevanza") or "").strip().lower()
         if rilevanza not in ("alta", "media"):
