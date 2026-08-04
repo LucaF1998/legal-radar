@@ -8,6 +8,7 @@ import re
 import json
 import html
 import logging
+import urllib.parse
 import pdf_export
 from contextlib import contextmanager
 from bs4 import BeautifulSoup
@@ -610,35 +611,6 @@ class LegalRadarDB:
         with self.get_cursor() as cur:
             cur.execute(query, (tipo_atto, user_id))
             return [r[0] for r in cur.fetchall()]
-
-    def cerca_precedenti_garante(self, parole_chiave: List[str], limite: int = 4) -> List[Dict]:
-        """Cerca nell'archivio i provvedimenti (in senso lato: atti non-news) che
-        toccano il tipo di trattamento descritto, a partire dalle parole chiave
-        estratte dallo scenario. Serve al Calcolatore Sanzioni per mostrare i
-        PRECEDENTI REALI correlati: documenti veri dell'archivio, con link,
-        contro il rischio di 'precedenti' inventati dall'AI."""
-        parole = [p.strip() for p in (parole_chiave or []) if p and len(p.strip()) >= 3][:5]
-        if not parole:
-            return []
-        condizioni, params = [], []
-        for p in parole:
-            like = f"%{p}%"
-            condizioni.append("(a.titolo ILIKE %s OR a.preview ILIKE %s OR a.riassunto_ai ILIKE %s)")
-            params.extend([like, like, like])
-        query = f"""
-            SELECT a.id, a.titolo, a.link, a.fonte, a.tema,
-                   COALESCE(a.data_pubblicazione, a.data_scansione::date) AS data_rif
-            FROM articles a
-            LEFT JOIN sources src ON src.nome = a.fonte
-            WHERE LOWER(COALESCE(src.tipo_fonte,'')) <> 'editoriale'
-              AND ({" OR ".join(condizioni)})
-            ORDER BY data_rif DESC NULLS LAST
-            LIMIT %s
-        """
-        params.append(limite)
-        with self.get_cursor(dict_cursor=True) as cur:
-            cur.execute(query, params)
-            return [dict(r) for r in cur.fetchall()]
 
     def ricerca_globale(self, user_id: int, testo: str, limite: int = 40) -> Dict[str, List[Dict]]:
         """Cerca lo stesso testo su articoli e report del Radar. Ritorna due liste separate.
@@ -1466,6 +1438,50 @@ def motore_stima_sanzione(fatturato: float, scaglione: str, gravita: str,
     }
 
 
+def _valida_precedenti(grezzi) -> List[Dict]:
+    """Normalizza i precedenti richiamati dal modello e SCARTA gli estremi non
+    plausibili. È il presidio centrale di questa funzione: il modello non ha un
+    indice dei provvedimenti e, se lasciato libero, produce numeri di registro
+    verosimili ma inesatti. Qui:
+      - la descrizione del caso resta (è verificabile e utile);
+      - gli 'estremi' sopravvivono solo se hanno una forma credibile E la
+        certezza dichiarata è alta; in ogni altro caso vengono azzerati.
+    Meglio un precedente senza numero che un numero sbagliato.
+    """
+    ORDINI = {"decine di migliaia", "centinaia di migliaia", "milioni"}
+    puliti: List[Dict] = []
+    if not isinstance(grezzi, list):
+        return puliti
+    for p in grezzi[:4]:
+        if not isinstance(p, dict):
+            continue
+        caso = str(p.get("caso") or "").strip()
+        if len(caso) < 10:
+            continue  # senza una descrizione utilizzabile il precedente non serve
+        certezza = p.get("certezza") if p.get("certezza") in ("alta", "media", "bassa") else "bassa"
+
+        # Anno: solo se plausibile (il GDPR si applica dal 2018)
+        anno = None
+        m_anno = re.search(r"(20\d{2})", str(p.get("anno") or ""))
+        if m_anno and 2018 <= int(m_anno.group(1)) <= datetime.now().year:
+            anno = m_anno.group(1)
+
+        ordine = p.get("ordine_importo")
+        ordine = ordine if ordine in ORDINI else None
+
+        # Estremi: conservati SOLO con certezza alta e forma credibile.
+        # Qualunque altra combinazione -> None (nessun numero mostrato).
+        estremi = str(p.get("estremi") or "").strip()
+        if estremi.lower() in ("", "null", "none", "n/d", "nd"):
+            estremi = None
+        elif certezza != "alta" or len(estremi) > 90:
+            estremi = None
+
+        puliti.append({"caso": caso, "anno": anno, "ordine_importo": ordine,
+                       "estremi": estremi, "certezza": certezza})
+    return puliti
+
+
 def analizza_scenario_gdpr_groq(descrizione: str, contesto: Dict) -> Dict:
     """Chiede all'AI di interpretare lo scenario: articoli GDPR potenzialmente
     violati, scaglione applicabile, gravità suggerita e motivazione.
@@ -1487,7 +1503,9 @@ def analizza_scenario_gdpr_groq(descrizione: str, contesto: Dict) -> Dict:
         '  "motivazione_gravita": "1-2 frasi sul perche\'",\n'
         '  "prassi_sanzionatoria": "consolidata" | "episodica" | "non_nota",\n'
         '  "descrizione_prassi": "1-2 frasi che caratterizzano l\'attivita\' sanzionatoria del Garante su questo TIPO di trattamento",\n'
-        '  "parole_chiave": ["3-5 parole chiave in italiano per cercare provvedimenti simili in archivio"],\n'
+        '  "precedenti_noti": true/false,\n'
+        '  "precedenti": [ {"caso": "descrizione del caso: settore e condotta contestata", "anno": "2023" oppure null, "ordine_importo": "decine di migliaia" | "centinaia di migliaia" | "milioni" | null, "estremi": null oppure gli estremi SOLO se ne hai certezza, "certezza": "alta" | "media" | "bassa"} ],\n'
+        '  "nota_precedenti": "cosa ricordi con sicurezza e cosa no su questi precedenti",\n'
         '  "osservazioni": "eventuali cautele, profili dubbi, o cosa manca per valutare meglio"\n'
         "}\n\n"
         "REGOLE VINCOLANTI:\n"
@@ -1501,15 +1519,23 @@ def analizza_scenario_gdpr_groq(descrizione: str, contesto: Dict) -> Dict:
         "- NON inventare articoli: cita solo profili chiaramente desumibili dalla descrizione.\n"
         "- Se la descrizione non evidenzia alcuna violazione plausibile, metti violazioni_rilevate: false "
         "e spiega nelle osservazioni.\n"
-        "- Gravita': valuta natura, ambito, categorie di dati, numero interessati, durata (art. 83.2 lett. a, b, g).\n"
         "- Prassi sanzionatoria: indica 'consolidata' SOLO se il tipo di trattamento descritto appartiene a un filone "
         "storicamente e notoriamente perseguito dal Garante italiano (es. telemarketing indesiderato, controllo dei "
         "lavoratori, violazioni su dati sanitari, cookie e tracciamento senza consenso); 'episodica' se risultano "
-        "interventi occasionali; 'non_nota' negli altri casi. Nella descrizione della prassi caratterizza il filone "
-        "in termini generali: NON citare estremi, date, numeri o importi di provvedimenti specifici, che potrebbero "
-        "essere imprecisi. La verifica sui provvedimenti reali avviene altrove.\n"
-        "- Parole chiave: scegli 3-5 termini concreti e specifici del trattamento (es. 'telemarketing', 'geolocalizzazione', "
-        "'newsletter', 'videosorveglianza'), utili per una ricerca testuale in un archivio di provvedimenti."
+        "interventi occasionali; 'non_nota' negli altri casi.\n"
+        "- PRECEDENTI: elenca fino a 4 casi sanzionatori del Garante che ricordi effettivamente e che condividano "
+        "la base sanzionatoria con lo scenario. REGOLE INDEROGABILI su questo punto:\n"
+        "  (a) NON inventare MAI numeri di registro, codici docweb, date precise o importi esatti. Se non hai "
+        "certezza degli estremi, il campo 'estremi' DEVE essere null: un estremo sbagliato e' piu' dannoso "
+        "dell'assenza di estremi, perche' chi legge potrebbe citarlo.\n"
+        "  (b) Descrivi il caso per quello che lo rende riconoscibile (settore e condotta contestata): la "
+        "descrizione e' verificabile, il numero no.\n"
+        "  (c) Per l'importo indica solo l'ordine di grandezza, mai una cifra puntuale.\n"
+        "  (d) 'certezza' e' la tua autovalutazione onesta su quel caso: usa 'alta' solo per casi notori di cui "
+        "sei sicuro, 'bassa' quando hai un ricordo vago. Un caso a certezza bassa e' utile come pista, non come citazione.\n"
+        "  (e) Se non ricordi precedenti attendibili su questa base sanzionatoria, metti precedenti_noti a false e "
+        "lista vuota. Dichiararlo e' una risposta corretta e preferibile a un elenco inventato.\n"
+        "- Gravita': valuta natura, ambito, categorie di dati, numero interessati, durata (art. 83.2 lett. a, b, g)."
     )
     user_msg = (
         f"SCENARIO:\n{descrizione}\n\n"
@@ -1546,8 +1572,8 @@ def analizza_scenario_gdpr_groq(descrizione: str, contesto: Dict) -> Dict:
             dati["articoli"] = []
         if dati.get("prassi_sanzionatoria") not in ("consolidata", "episodica", "non_nota"):
             dati["prassi_sanzionatoria"] = "non_nota"
-        if not isinstance(dati.get("parole_chiave"), list):
-            dati["parole_chiave"] = []
+        dati["precedenti"] = _valida_precedenti(dati.get("precedenti"))
+        dati["precedenti_noti"] = bool(dati["precedenti"])
         return dati
     except json.JSONDecodeError:
         return {"errore": "Risposta AI non interpretabile. Riprova."}
@@ -2753,17 +2779,40 @@ elif pagina_pulita == "🧮 Calcolatore Sanzioni":
             if esito.get('descrizione_prassi'):
                 st.markdown(f"<div style='font-size:14px; line-height:1.6; color:var(--ink-soft);'>{html.escape(str(esito['descrizione_prassi']))}</div>", unsafe_allow_html=True)
 
-            # Precedenti REALI correlati, pescati dall'archivio del Radar
-            precedenti = db.cerca_precedenti_garante(esito.get('parole_chiave', []))
-            if precedenti:
-                st.markdown("<div class='report-sec-h' style='margin-top:14px;'>PRECEDENTI CORRELATI NELL'ARCHIVIO DEL RADAR</div>", unsafe_allow_html=True)
+            # --- PRECEDENTI SANZIONATORI richiamati dal modello ---
+            # ATTENZIONE PROGETTUALE: questi precedenti provengono dalla memoria del
+            # modello, non da un archivio verificato. Il modello conosce i filoni ma
+            # non ha un indice dei provvedimenti: gli estremi sono quindi mostrati solo
+            # se dichiarati con certezza alta (cfr. _valida_precedenti) e ogni voce
+            # riporta un link per la verifica in un clic sul sito del Garante.
+            precedenti = esito.get('precedenti', [])
+            st.markdown("<div class='report-sec-h' style='margin-top:16px;'>PRECEDENTI SANZIONATORI &mdash; RICHIAMO AI, DA VERIFICARE</div>", unsafe_allow_html=True)
+            if not precedenti:
+                st.markdown("<div style='font-size:14px; line-height:1.6; color:var(--ink-soft);'><b>Nessun precedente attendibile richiamato</b> per questa base sanzionatoria. Non significa che il Garante non sia mai intervenuto su fattispecie simili: significa che il modello non ha un ricordo affidabile da riportare.</div>", unsafe_allow_html=True)
+            else:
+                COL_CERT = {"alta": ("var(--provv-tx)", "var(--provv-bg)"),
+                            "media": ("var(--accent-hover)", "var(--accent-soft)"),
+                            "bassa": ("var(--ink-soft)", "#F2F2F2")}
                 for pr in precedenti:
-                    dt = pr['data_rif'].strftime('%d/%m/%Y') if pr.get('data_rif') else ''
-                    meta = " · ".join(x for x in [html.escape(str(pr.get('fonte') or '')), dt] if x)
-                    st.markdown(f"<div style='font-size:14px; line-height:1.55; margin:5px 0;'><a href='{html.escape(str(pr['link']))}' target='_blank' style='color:var(--ink); font-weight:500; text-decoration:none;'>{html.escape(str(pr['titolo']))}</a><span style='font-family:var(--mono); font-size:11px; color:var(--ink-faint);'> — {meta}</span></div>", unsafe_allow_html=True)
-                st.caption("Atti realmente presenti nell'archivio del Radar, correlati per parole chiave: il confronto con casi concreti è il miglior riscontro della stima.")
-            elif esito.get('parole_chiave'):
-                st.caption("Nessun atto correlato trovato nell'archivio del Radar per questo tipo di trattamento.")
+                    fg, bg = COL_CERT.get(pr['certezza'], COL_CERT['bassa'])
+                    meta = " · ".join(x for x in [
+                        pr['anno'] or "",
+                        (f"ordine di grandezza: {pr['ordine_importo']}" if pr['ordine_importo'] else ""),
+                        (f"estremi indicati: {pr['estremi']}" if pr['estremi'] else ""),
+                    ] if x)
+                    query = urllib.parse.quote_plus(f"site:garanteprivacy.it {pr['caso'][:110]}")
+                    st.markdown(
+                        f"<div style='border-left:2px solid var(--hair); padding:5px 0 5px 13px; margin:9px 0;'>"
+                        f"<div style='font-size:14px; line-height:1.5; color:var(--ink);'>{html.escape(pr['caso'])}</div>"
+                        f"<div style='margin-top:5px;'>"
+                        f"<span style='font-size:10.5px; font-weight:700; padding:2px 9px; border-radius:999px; background:{bg}; color:{fg};'>CERTEZZA {pr['certezza'].upper()}</span>"
+                        + (f"<span style='font-family:var(--mono); font-size:11px; color:var(--ink-faint);'> &nbsp;{html.escape(meta)}</span>" if meta else "")
+                        + f"</div>"
+                        f"<a href='https://www.google.com/search?q={query}' target='_blank' style='font-size:12px; color:var(--accent); text-decoration:none;'>&rarr; verifica sul sito del Garante</a>"
+                        f"</div>", unsafe_allow_html=True)
+                if esito.get('nota_precedenti'):
+                    st.markdown(f"<div style='font-size:13px; line-height:1.55; color:var(--ink-soft); margin-top:8px;'>{html.escape(str(esito['nota_precedenti']))}</div>", unsafe_allow_html=True)
+                st.markdown("<div style='background:#FFEFEF; border-radius:10px; padding:11px 15px; margin-top:12px; font-size:12.5px; line-height:1.5; color:var(--alta);'><b>Da verificare prima di ogni utilizzo.</b> Questi precedenti sono ricordati dal modello, non estratti da un archivio: descrizioni e ordini di grandezza sono indicativi e gli estremi possono essere inesatti o inesistenti. Usali come piste di ricerca e confermali sul sito del Garante prima di citarli in qualsiasi documento.</div>", unsafe_allow_html=True)
 
             if esito.get('osservazioni'):
                 st.markdown(f"<div class='report-sec-h' style='margin-top:14px;'>OSSERVAZIONI</div><div style='font-size:14px; color:var(--ink-soft);'>{html.escape(str(esito['osservazioni']))}</div>", unsafe_allow_html=True)
