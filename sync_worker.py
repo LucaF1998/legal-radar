@@ -2,6 +2,7 @@ import os
 import re
 import sys
 import json
+import time
 import logging
 from datetime import datetime
 from typing import List, Tuple, Dict, Optional
@@ -167,11 +168,29 @@ def genera_microriassunto(titolo: str, preview: str, e_ufficiale: bool = True,
         # secca e i token di ragionamento consumerebbero il budget della risposta.
         payload["reasoning_effort"] = "low"
     try:
-        r = requests.post(api_url, headers=headers, json=payload, timeout=15)
-        if r.status_code != 200:
-            logging.error("Microriassunto: errore AI %s per '%s'", r.status_code, titolo[:50])
+        # GESTIONE QUOTA (429). Il piano gratuito concede 8.000 token al minuto:
+        # classificando decine di articoli di fila il tetto si raggiunge di sicuro.
+        # Qui nessuno attende davanti allo schermo, quindi la cosa giusta e' avere
+        # pazienza: rispettiamo il tempo indicato da Groq e riproviamo, invece di
+        # lasciare l'articolo senza classificazione.
+        r = None
+        for tentativo in range(3):
+            r = requests.post(api_url, headers=headers, json=payload, timeout=20)
+            if r.status_code != 429:
+                break
+            attesa = r.headers.get("retry-after")
+            try:
+                attesa_sec = min(int(float(attesa)), 70) if attesa else 20
+            except (TypeError, ValueError):
+                attesa_sec = 20
+            logging.warning("Quota AI raggiunta: attendo %ss e riprovo (%d/3).", attesa_sec, tentativo + 1)
+            time.sleep(attesa_sec + 1)
+        if r is None or r.status_code != 200:
+            codice = r.status_code if r is not None else "assente"
+            logging.error("Microriassunto: errore AI %s per '%s'", codice, titolo[:50])
             return None, None, None, None, None
-        dati = json.loads(r.json()['choices'][0]['message']['content'].strip())
+        contenuto = r.json()['choices'][0]['message']['content'].strip()
+        dati = json.loads(contenuto.replace("```json", "").replace("```", "").strip())
         riassunto = (dati.get("riassunto") or "").strip()[:600] or None
         rilevanza = (dati.get("rilevanza") or "").strip().lower()
         if rilevanza not in ("alta", "media"):
@@ -204,6 +223,7 @@ def _ingest_rss(f: Dict) -> List[Tuple]:
         serve_titolo = titolo_invalido(titolo)
         data_pub = estrai_data_pubblicazione(entry)
         # All'AI il testo esteso (fino a 1200 char) per classificazione/riassunto più precisi
+        time.sleep(PAUSA_FRA_CLASSIFICAZIONI)  # distribuisce il consumo di token nel minuto
         riassunto, rilevanza, categoria, tema, titolo_ai = genera_microriassunto(
             titolo, testo_completo[:1200], e_ufficiale=e_ufficiale, serve_titolo=serve_titolo)
         if serve_titolo:
@@ -296,6 +316,12 @@ STRATEGIE_INGESTION = {
     "rss": _ingest_rss,
     "scraper": _ingest_scraper,
 }
+
+
+# Pausa fra le chiamate di classificazione: con 8.000 token/min una raffica di
+# richieste esaurirebbe il budget. Mezzo secondo distribuisce il consumo senza
+# allungare in modo sensibile il lavoro notturno.
+PAUSA_FRA_CLASSIFICAZIONI = 0.5
 
 
 def esegui_scansione_notturna() -> None:
