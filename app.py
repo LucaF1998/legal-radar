@@ -3055,7 +3055,12 @@ elif pagina_pulita == "⚙️ Gestione Fonti":
                    "Le modifiche valgono per tutti gli utenti.")
     else:
         st.caption("Elenco delle fonti del catalogo comune. La gestione è riservata agli amministratori.")
-    for f in fonti_personali:
+    # NB: qui serve il CATALOGO GLOBALE, non le preferenze del singolo utente:
+    # questa sezione gestisce le fonti comuni a tutti. La lista va caricata in
+    # questo punto perche' 'fonti_personali' del pannello dei toggle e' una
+    # variabile locale a quel fragment e qui non risulta visibile.
+    fonti_catalogo = db.carica_fonti()
+    for f in fonti_catalogo:
         tipo_corrente = "Editoriale" if (f.get('tipo_fonte') or '').lower() == "editoriale" else "Ufficiale"
         if is_admin:
             col_t, col_tipo, col_b = st.columns([3, 1.4, 1])
